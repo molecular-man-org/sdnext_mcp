@@ -2,7 +2,7 @@
 
 Model Context Protocol (MCP) server for **SD.Next** (Stable Diffusion Next) WebUI.
 
-It wraps SD.Next's REST API (`/sdapi/v1/*` + `/sdapi/v2/civitai/*`) as **125 MCP tools** so an LLM host (Claude Desktop, DSH, etc.) can drive every SD.Next usage scenario: text-to-image, image-to-image, control-guided generation, upscaling, detailer, LoRA, scripts, captioning/tagging/VQA, model & option management, server introspection, file/gallery, and CivitAI.
+It wraps SD.Next's REST API (`/sdapi/v1/*` + `/sdapi/v2/civitai/*`) as **128 MCP tools** so an LLM host (Claude Desktop, DSH, etc.) can drive every SD.Next usage scenario: text-to-image, image-to-image, control-guided generation, video generation, upscaling, detailer, LoRA, scripts, captioning/tagging/VQA, model & option management, server introspection, file/gallery, and CivitAI.
 
 > **This is a thin HTTP client.** It does not embed Python and does not launch the WebUI. You must run SD.Next yourself with `--api --listen`; the MCP server just talks to it over HTTP.
 
@@ -62,18 +62,25 @@ SDNEXT_MCP_TRANSPORT=http SDNEXT_MCP_PORT=8787 node src/index.js
 | `SDNEXT_MCP_DRY_RUN`                  | `false`                 | `1` = print requests, don't send       |
 | `SDNEXT_SAVE_DIR`                     | —                       | Default dir for `save_dir` disk writes |
 
-## Tool families (125 total)
+## Tool families (128 total)
 
-- **Generation** — `sdnext_txt2img`, `sdnext_img2img`, `sdnext_control`, `sdnext_process_image`, `sdnext_process_batch`, `sdnext_detail`, `sdnext_prompt_enhance`
-- **Enumerators** — `sdnext_list_samplers` … `sdnext_list_masking` (29 list tools)
+- **Generation** — `sdnext_txt2img`, `sdnext_img2img`, `sdnext_control`, `sdnext_process_image`, `sdnext_process_batch`, `sdnext_detail`, `sdnext_video`, `sdnext_prompt_enhance`
+- **Enumerators** — `sdnext_list_samplers` … `sdnext_list_video_models` (30 list tools)
 - **Image understanding** — `sdnext_caption`, `sdnext_caption_dispatch`, `sdnext_tagger`, `sdnext_vqa`, `sdnext_analyze`
 - **Models/options** — refresh/select/load checkpoint, VAE, UNet, LoRA; `sdnext_get_options`/`sdnext_set_options`
 - **Server** — `sdnext_status`, `sdnext_progress`, interrupt/skip, restart/shutdown, log, history, storage, GPU
-- **Files/Gallery** — `sdnext_upload`, `sdnext_file`, `delete-*`, `browser/*`, `sdnext_png_info`
+- **Files/Gallery** — `sdnext_upload`, `sdnext_file`, `sdnext_video_file`, `delete-*`, `browser/*`, `sdnext_png_info`
 - **Control processing** — `sdnext_preprocess`, `sdnext_mask`, `sdnext_detect`
 - **Moderation** — `sdnext_nudenet`, `sdnext_prompt_lang`, `sdnext_image_guard`, `sdnext_prompt_banned`
 - **CivitAI** — search, model/version, download queue, settings, bookmarks, banned, history (27 tools)
 - **Meta** — `sdnext_list_tools`, `sdnext_call_api` (generic passthrough), autocomplete file mgmt
+
+Generation tools that produce images/video return a small JSON summary plus the images as native MCP
+image content (capped at `SDNEXT_MAX_IMAGES`, inlined unless `save_dir` is set) — see
+[`docs/media-content.md`](docs/media-content.md) for the `return_images`/`save_dir` behavior. Video bytes are
+never inlined (no MCP video content type, and files are far too large); pass `save_dir` on
+`sdnext_video` to save the `.mp4` and thumbnail to disk, or fetch a previously generated one with
+`sdnext_video_file`.
 
 Run `sdnext_list_tools` at runtime for the full catalog, or `node scripts/dump_tools.mjs`.
 

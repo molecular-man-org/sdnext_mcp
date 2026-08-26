@@ -22,7 +22,14 @@ export function callTool(server, name, args = {}, extra = {}) {
   return entry.handler(args, extra);
 }
 
-// Parses the JSON text out of a successful ok() envelope.
+// Parses the JSON text out of a successful ok() envelope. Assumes the text
+// block is content[0] — true both for plain JSON results and for results
+// shaped via shapeImageResult() (text summary first, then image blocks).
 export function resultJson(result) {
   return JSON.parse(result.content[0].text);
+}
+
+// Returns just the { type: 'image', ... } blocks from a result's content array.
+export function imageBlocks(result) {
+  return result.content.filter((c) => c.type === 'image');
 }

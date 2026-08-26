@@ -81,4 +81,43 @@ export const client = {
   post: (path, opts) => request(path, { ...opts, method: 'POST' }),
   put: (path, opts) => request(path, { ...opts, method: 'PUT' }),
   del: (path, opts) => request(path, { ...opts, method: 'DELETE' }),
+  getBinary,
 };
+
+// For endpoints that serve a raw file (e.g. GET /sdapi/v1/video/file) rather
+// than JSON — request()'s res.text() would corrupt binary content. Returns
+// { base64 } on success, or the same __dryRun descriptor shape as request().
+async function getBinary(path, { query, timeoutMs } = {}) {
+  const url = new URL(apiUrl(path));
+  if (query) for (const [k, v] of Object.entries(query)) {
+    if (v === undefined || v === null) continue;
+    url.searchParams.set(k, String(v));
+  }
+
+  if (config.dryRun) {
+    return {
+      __dryRun: true,
+      method: 'GET',
+      url: url.toString(),
+      note: 'DRY RUN (SDNEXT_MCP_DRY_RUN=1): request not sent',
+    };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs ?? config.timeoutMs);
+  try {
+    const res = await fetch(url, { method: 'GET', headers: authHeader(), signal: controller.signal });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new SdNextError(`SD.Next API ${res.status} ${res.statusText} for GET ${url.pathname}: ${text.slice(0, 1000)}`, { status: res.status });
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    return { base64: buf.toString('base64') };
+  } catch (e) {
+    if (e instanceof SdNextError) throw e;
+    if (e.name === 'AbortError') throw new SdNextError(`Request timed out after ${timeoutMs ?? config.timeoutMs}ms: GET ${url.pathname}`);
+    throw new SdNextError(`Cannot reach SD.Next at ${url.origin} — is the WebUI running with --api --listen? (${e.message})`);
+  } finally {
+    clearTimeout(timer);
+  }
+}

@@ -53,4 +53,11 @@ describe('GET tools with a schema', () => {
     await callTool(server, 'sdnext_list_controlnets', {});
     expect(client.get).toHaveBeenCalledWith('/sdapi/v1/controlnets', { query: {} });
   });
+
+  it('sdnext_list_video_models passes the engine filter as the query', async () => {
+    client.get.mockResolvedValue([{ engine: 'Hunyuan Video', name: 'x', loaded: false }]);
+    const res = await callTool(server, 'sdnext_list_video_models', { engine: 'Hunyuan Video' });
+    expect(client.get).toHaveBeenCalledWith('/sdapi/v1/video/models', { query: { engine: 'Hunyuan Video' } });
+    expect(resultJson(res)).toEqual([{ engine: 'Hunyuan Video', name: 'x', loaded: false }]);
+  });
 });

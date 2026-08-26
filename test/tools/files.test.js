@@ -2,11 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../../src/client.js', async (importOriginal) => {
   const actual = await importOriginal();
-  return { ...actual, client: { get: vi.fn(), post: vi.fn(), put: vi.fn(), del: vi.fn() } };
+  return { ...actual, client: { get: vi.fn(), post: vi.fn(), put: vi.fn(), del: vi.fn(), getBinary: vi.fn() } };
 });
+vi.mock('../../src/image.js', () => ({ saveImages: vi.fn() }));
 
 import { client } from '../../src/client.js';
 import { config } from '../../src/config.js';
+import { saveImages } from '../../src/image.js';
 import * as files from '../../src/tools/files.js';
 import { fakeServer, callTool, resultJson } from '../harness.js';
 
@@ -122,5 +124,36 @@ describe('sdnext_upload', () => {
     const res = await callTool(server, 'sdnext_upload', { filename: 'x.png', content_base64: 'aGVsbG8=' });
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toContain('server exploded');
+  });
+});
+
+describe('sdnext_video_file', () => {
+  it('fetches, base64-decodes, and saves with the given (or default) extension', async () => {
+    client.getBinary.mockResolvedValue({ base64: 'AAAA' });
+    saveImages.mockReturnValue(['/out/v.mp4']);
+
+    const res = await callTool(server, 'sdnext_video_file', { file: '/srv/path/to/x.mp4', save_dir: '/out' });
+
+    expect(client.getBinary).toHaveBeenCalledWith('/sdapi/v1/video/file', { query: { file: '/srv/path/to/x.mp4' } });
+    expect(saveImages).toHaveBeenCalledWith(['AAAA'], { dir: '/out', prefix: 'sdnext_video_file', fmt: 'mp4' });
+    expect(resultJson(res).saved_files).toEqual(['/out/v.mp4']);
+  });
+
+  it('honors an explicit fmt override (e.g. for a thumbnail/frame path)', async () => {
+    client.getBinary.mockResolvedValue({ base64: 'AAAA' });
+    saveImages.mockReturnValue(['/out/t.png']);
+
+    await callTool(server, 'sdnext_video_file', { file: '/srv/path/to/thumb', save_dir: '/out', fmt: 'png' });
+
+    expect(saveImages).toHaveBeenCalledWith(['AAAA'], { dir: '/out', prefix: 'sdnext_video_file', fmt: 'png' });
+  });
+
+  it('passes a dry-run descriptor straight through without touching saveImages', async () => {
+    client.getBinary.mockResolvedValue({ __dryRun: true, method: 'GET', url: 'x', note: 'n' });
+
+    const res = await callTool(server, 'sdnext_video_file', { file: '/srv/x.mp4', save_dir: '/out' });
+
+    expect(saveImages).not.toHaveBeenCalled();
+    expect(resultJson(res).__dryRun).toBe(true);
   });
 });

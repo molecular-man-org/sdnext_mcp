@@ -172,3 +172,65 @@ describe('client.get/post/put/del via request()', () => {
     expect(opts.headers.Authorization).toBe('Bearer tok');
   });
 });
+
+describe('client.getBinary()', () => {
+  it('returns a dry-run descriptor without calling fetch when config.dryRun is true', async () => {
+    config.dryRun = true;
+    const res = await client.getBinary('/sdapi/v1/video/file', { query: { file: 'a.mp4' } });
+    expect(res.__dryRun).toBe(true);
+    expect(res.method).toBe('GET');
+    expect(res.url).toBe('http://127.0.0.1:7860/sdapi/v1/video/file?file=a.mp4');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('base64-encodes the raw response body', async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    fetch.mockResolvedValue({ ok: true, arrayBuffer: async () => bytes.buffer });
+    const res = await client.getBinary('/sdapi/v1/video/file', { query: { file: 'a.mp4' } });
+    expect(res).toEqual({ base64: Buffer.from(bytes).toString('base64') });
+  });
+
+  it('sends the Authorization header and query params like other client methods', async () => {
+    config.apiKey = 'tok';
+    fetch.mockResolvedValue({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) });
+    await client.getBinary('/sdapi/v1/video/file', { query: { file: 'a.mp4', skip: undefined } });
+    const [url, opts] = fetch.mock.calls[0];
+    expect(url.toString()).toBe('http://127.0.0.1:7860/sdapi/v1/video/file?file=a.mp4');
+    expect(opts.headers.Authorization).toBe('Bearer tok');
+  });
+
+  it('throws SdNextError with response text on a non-ok response', async () => {
+    fetch.mockResolvedValue({ ok: false, status: 404, statusText: 'Not Found', text: async () => 'no such file' });
+    await expect(client.getBinary('/sdapi/v1/video/file', { query: { file: 'x' } })).rejects.toMatchObject({
+      name: 'SdNextError',
+      status: 404,
+    });
+  });
+
+  it('falls back to empty text when reading the error body itself fails', async () => {
+    fetch.mockResolvedValue({ ok: false, status: 500, statusText: 'Server Error', text: async () => { throw new Error('stream closed'); } });
+    await expect(client.getBinary('/sdapi/v1/video/file', { query: { file: 'x' } })).rejects.toThrow(/500/);
+  });
+
+  it('wraps an AbortError as a timeout SdNextError', async () => {
+    const abortErr = new Error('aborted');
+    abortErr.name = 'AbortError';
+    fetch.mockRejectedValue(abortErr);
+    await expect(client.getBinary('/sdapi/v1/video/file', { query: { file: 'x' }, timeoutMs: 10 })).rejects.toThrow(/timed out/);
+  });
+
+  it('wraps a generic network error as an unreachable SdNextError', async () => {
+    fetch.mockRejectedValue(new Error('ECONNREFUSED'));
+    await expect(client.getBinary('/sdapi/v1/video/file', { query: { file: 'x' } })).rejects.toThrow(/Cannot reach SD.Next/);
+  });
+
+  it('re-throws SdNextError instances unchanged (does not double-wrap)', async () => {
+    fetch.mockResolvedValue({ ok: false, status: 404, statusText: 'Not Found', text: async () => 'nope' });
+    try {
+      await client.getBinary('/sdapi/v1/video/file', { query: { file: 'x' } });
+      throw new Error('expected getBinary to throw');
+    } catch (e) {
+      expect(e).toBeInstanceOf(SdNextError);
+    }
+  });
+});

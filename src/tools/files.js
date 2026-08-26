@@ -2,6 +2,7 @@
 import { z } from 'zod';
 import { client } from '../client.js';
 import { config, authHeader } from '../config.js';
+import { saveImages } from '../image.js';
 import { registerTool } from '../registry.js';
 
 const img = z.string().describe('Base64-encoded image (raw base64, data: URL, or "upload:<id>" ref).');
@@ -116,4 +117,23 @@ export function register(server) {
     'Get a thumbnail for an extra-network item (GET /sdapi/v1/network/thumb?file=...).',
     '/sdapi/v1/network/thumb',
     z.object({ file: z.string().describe('Network thumbnail path.') }));
+
+  registerTool(server, {
+    name: 'sdnext_video_file',
+    title: 'Fetch Generated Video',
+    method: 'GET',
+    path: '/sdapi/v1/video/file',
+    description: 'Fetch a video/thumbnail/frame artifact by its server-side path (GET /sdapi/v1/video/file) — from video_path, thumbnail_path, or a frame path returned by sdnext_video. save_dir is required: video files are far too large to return inline.',
+    inputSchema: z.object({
+      file: z.string().describe('Server-side path from sdnext_video (video_path, thumbnail_path, or a frame path).'),
+      save_dir: z.string().describe('Local directory to write the fetched file into.'),
+      fmt: z.string().optional().describe('File extension to save with (default "mp4"; use "png" for a thumbnail/frame path).'),
+    }),
+    handler: async (args) => {
+      const result = await client.getBinary('/sdapi/v1/video/file', { query: { file: args.file } });
+      if (result.__dryRun) return result;
+      const written = saveImages([result.base64], { dir: args.save_dir, prefix: 'sdnext_video_file', fmt: args.fmt || 'mp4' });
+      return { saved_files: written };
+    },
+  });
 }

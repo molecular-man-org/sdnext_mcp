@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { registerTool, ok, fail, listTools, callApiSchema } from '../src/registry.js';
+import { registerTool, ok, fail, listTools, callApiSchema, imageContent } from '../src/registry.js';
 
 function fakeServer() {
   const calls = new Map();
@@ -17,6 +17,36 @@ describe('ok()', () => {
   it('JSON-stringifies non-string data', () => {
     const res = ok({ a: 1 });
     expect(res.content[0].text).toBe(JSON.stringify({ a: 1 }, null, 2));
+  });
+
+  it('passes __mcpContent through as the content array unchanged', () => {
+    const blocks = [{ type: 'text', text: 'summary' }, { type: 'image', data: 'AAAA', mimeType: 'image/png' }];
+    expect(ok({ __mcpContent: blocks })).toEqual({ content: blocks });
+  });
+
+  it('does not treat a non-array __mcpContent as the special marker', () => {
+    const res = ok({ __mcpContent: 'not an array' });
+    expect(res.content[0].type).toBe('text');
+    expect(JSON.parse(res.content[0].text).__mcpContent).toBe('not an array');
+  });
+});
+
+describe('imageContent()', () => {
+  it('maps base64 strings to MCP image content blocks', () => {
+    expect(imageContent(['AAAA', 'BBBB'])).toEqual([
+      { type: 'image', data: 'AAAA', mimeType: 'image/png' },
+      { type: 'image', data: 'BBBB', mimeType: 'image/png' },
+    ]);
+  });
+
+  it('drops non-string and empty-string entries', () => {
+    expect(imageContent(['', 'AAAA', 123, null, undefined])).toEqual([
+      { type: 'image', data: 'AAAA', mimeType: 'image/png' },
+    ]);
+  });
+
+  it('defaults to an empty array when called with no argument', () => {
+    expect(imageContent()).toEqual([]);
   });
 });
 

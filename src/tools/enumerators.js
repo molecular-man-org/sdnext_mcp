@@ -103,4 +103,8 @@ export function register(server) {
     'List available tagger models (wd-tagger, deepdanbooru, etc.) (GET /sdapi/v1/tagger/models).', '/sdapi/v1/tagger/models');
   get('sdnext_list_masking', 'List Masking Options',
     'List segmentation mask models, color maps, params and types (GET /sdapi/v1/masking).', '/sdapi/v1/masking');
+  get('sdnext_list_video_models', 'List Video Models',
+    'List video engines and models, optionally filtered by engine (GET /sdapi/v1/video/models). Use engine+name for sdnext_video; "loaded" marks the currently-loaded model.',
+    '/sdapi/v1/video/models',
+    z.object({ engine: z.string().optional().describe('Filter by video engine family (e.g. "Hunyuan Video").') }));
 }

@@ -1,9 +1,16 @@
 // tools/generation.js — 生成类工具：txt2img / img2img / control / process / detail / prompt enhance
 import { z } from 'zod';
 import { client, clean } from '../client.js';
+import { config } from '../config.js';
 import { saveImages } from '../image.js';
-import { registerTool } from '../registry.js';
+import { registerTool, imageContent } from '../registry.js';
 import { coreGen, hiresGen, refinerGen, detailerGen, loraGen, img2imgGen, controlGen, xyzGen } from './_common.js';
+
+const returnImagesField = {
+  return_images: z.boolean().optional().describe(
+    'Include generated image bytes in the tool response, as MCP image content (default: true unless save_dir is set — inlining is a large token cost when the file is already on disk).'
+  ),
+};
 
 function withSave() {
   return {
@@ -13,18 +20,43 @@ function withSave() {
     ...detailerGen,
     ...loraGen,
     save_dir: z.string().optional().describe('Local directory to write returned images into (creates it).'),
+    ...returnImagesField,
   };
 }
 
-function shapeImages(data, args) {
-  const images = Array.isArray(data?.images) ? data.images : [];
-  const written = saveImages(images, { dir: args.save_dir });
-  return {
-    ...(data ?? {}),
-    images,
+// Whether to inline image bytes in the response: explicit return_images wins,
+// otherwise default to inlining only when there's no save_dir to point to instead.
+function resolveReturnImages(args) {
+  return typeof args.return_images === 'boolean' ? args.return_images : !args.save_dir;
+}
+
+// Shapes a text summary + capped MCP image content blocks from a list of base64
+// images, saving all of them to save_dir (if given) regardless of the cap.
+function shapeImageResult(images, args, extra = {}) {
+  const list = Array.isArray(images) ? images : [];
+  const written = saveImages(list, { dir: args.save_dir });
+  const wantInline = resolveReturnImages(args);
+  const cap = config.maxImagesInResponse;
+  const embedded = wantInline ? list.slice(0, cap) : [];
+  const hiddenByCap = list.length - embedded.length;
+
+  const summary = {
+    image_count: list.length,
     ...(written.length ? { saved_files: written } : {}),
-    info: data?.info,
-    parameters: data?.parameters,
+    ...(wantInline && hiddenByCap > 0
+      ? { note: `Showing ${embedded.length} of ${list.length} image(s) inline (SDNEXT_MAX_IMAGES=${cap}).${written.length ? '' : ' Set save_dir to keep the rest.'}` }
+      : {}),
+    ...(!wantInline && list.length
+      ? { note: `${list.length} image(s) generated and saved to disk, not included inline. Pass return_images:true to include them (large token cost).` }
+      : {}),
+    ...extra,
+  };
+
+  return {
+    __mcpContent: [
+      { type: 'text', text: JSON.stringify(summary, null, 2) },
+      ...imageContent(embedded),
+    ],
   };
 }
 
@@ -35,9 +67,15 @@ export function register(server) {
     title: 'Text to Image',
     method: 'POST',
     path: '/sdapi/v1/txt2img',
-    description: 'Generate images from text prompts (SD.Next /sdapi/v1/txt2img). Supports samplers, modular guidance, hires fix, refiner, detailer, LoRA (prompt <lora:name:weight>), styles, scripts, control units, face modules, XYZ grid. Returns base64 images, info string, and echoed parameters.',
+    description: 'Generate images from text prompts (SD.Next /sdapi/v1/txt2img). Supports samplers, modular guidance, hires fix, refiner, detailer, LoRA (prompt <lora:name:weight>), styles, scripts, control units, face modules, XYZ grid. Returns a JSON summary (saved_files, info, parameters) plus generated images as MCP image content (capped at SDNEXT_MAX_IMAGES, inlined only when save_dir is unset unless return_images overrides that).',
     inputSchema: { ...withSave(), ...controlGen, ...xyzGen },
-    handler: async (args) => shapeImages(await client.post('/sdapi/v1/txt2img', { body: clean({ ...args }) }), args),
+    handler: async (args) => {
+      const needsBytes = !!args.save_dir || resolveReturnImages(args);
+      const { return_images, ...rest } = args;
+      const body = clean({ ...rest, send_images: needsBytes ? true : rest.send_images });
+      const data = await client.post('/sdapi/v1/txt2img', { body });
+      return shapeImageResult(data?.images, args, { info: data?.info, parameters: data?.parameters });
+    },
   });
 
   // ── img2img ─────────────────────────────────────────────────────────────
@@ -48,7 +86,13 @@ export function register(server) {
     path: '/sdapi/v1/img2img',
     description: 'Generate images from input images with denoising (SD.Next /sdapi/v1/img2img). Supports inpainting via mask (white = repaint), color correction, hires fix, control units, and all txt2img parameters. init_images are base64 (or "upload:<id>" refs).',
     inputSchema: { ...withSave(), ...img2imgGen, ...controlGen, ...xyzGen },
-    handler: async (args) => shapeImages(await client.post('/sdapi/v1/img2img', { body: clean({ ...args }) }), args),
+    handler: async (args) => {
+      const needsBytes = !!args.save_dir || resolveReturnImages(args);
+      const { return_images, ...rest } = args;
+      const body = clean({ ...rest, send_images: needsBytes ? true : rest.send_images });
+      const data = await client.post('/sdapi/v1/img2img', { body });
+      return shapeImageResult(data?.images, args, { info: data?.info, parameters: data?.parameters });
+    },
   });
 
   // ── control (dedicated control-guided endpoint) ────────────────────────
@@ -57,9 +101,15 @@ export function register(server) {
     title: 'Control-guided Generation',
     method: 'POST',
     path: '/sdapi/v1/control',
-    description: 'Run the control-guided pipeline (SD.Next /sdapi/v1/control) with one or more control units (controlnet / t2i adapter / xs / lite / reference / ip). Returns generated images plus preprocessor output maps.',
-    inputSchema: { ...coreGen, ...hiresGen, control_units: z.array(z.any()).describe('Control units (see sdnext_txt2img control_units).'), unit_type: z.string().optional().describe('Request-level default unit type.'), face: z.record(z.any()).optional(), ip_adapter: z.array(z.any()).optional(), xyz: z.record(z.any()).optional(), save_dir: z.string().optional() },
-    handler: async (args) => shapeImages(await client.post('/sdapi/v1/control', { body: clean({ ...args }) }), args),
+    description: 'Run the control-guided pipeline (SD.Next /sdapi/v1/control) with one or more control units (controlnet / t2i adapter / xs / lite / reference / ip). Returns a JSON summary plus generated images as MCP image content (see sdnext_txt2img for the save_dir/return_images/SDNEXT_MAX_IMAGES behavior).',
+    inputSchema: { ...coreGen, ...hiresGen, control_units: z.array(z.any()).describe('Control units (see sdnext_txt2img control_units).'), unit_type: z.string().optional().describe('Request-level default unit type.'), face: z.record(z.any()).optional(), ip_adapter: z.array(z.any()).optional(), xyz: z.record(z.any()).optional(), save_dir: z.string().optional(), ...returnImagesField },
+    handler: async (args) => {
+      const needsBytes = !!args.save_dir || resolveReturnImages(args);
+      const { return_images, ...rest } = args;
+      const body = clean({ ...rest, send_images: needsBytes ? true : rest.send_images });
+      const data = await client.post('/sdapi/v1/control', { body });
+      return shapeImageResult(data?.images, args, { info: data?.info, parameters: data?.parameters });
+    },
   });
 
   // ── extras: process single image (upscaler / HiresFix) ─────────────────
@@ -82,12 +132,15 @@ export function register(server) {
       show_extras_results: z.boolean().optional().describe('Return the processed image.'),
       script_args: z.record(z.any()).optional().describe('Per-script args keyed by script name.'),
       save_dir: z.string().optional(),
+      ...returnImagesField,
     },
     handler: async (args) => {
-      const data = await client.post('/sdapi/v1/process', { body: clean({ ...args }) });
-      const out = { ...data };
-      if (data?.image) { out.image = data.image; if (args.save_dir) out.saved_files = saveImages([data.image], { dir: args.save_dir }); }
-      return out;
+      const needsBytes = !!args.save_dir || resolveReturnImages(args);
+      const { return_images, ...rest } = args;
+      const body = clean({ ...rest, show_extras_results: needsBytes ? true : rest.show_extras_results });
+      const data = await client.post('/sdapi/v1/process', { body });
+      const { image, ...dataRest } = data ?? {};
+      return shapeImageResult(image ? [image] : [], args, dataRest);
     },
   });
 
@@ -104,12 +157,15 @@ export function register(server) {
       upscaling_resize_h: z.number().int().optional(), upscaling_crop: z.boolean().optional(),
       upscaler_1: z.string().optional(), upscaler_2: z.string().optional(), extras_upscaler_2_visibility: z.number().optional(),
       show_extras_results: z.boolean().optional(), script_args: z.record(z.any()).optional(), save_dir: z.string().optional(),
+      ...returnImagesField,
     },
     handler: async (args) => {
-      const data = await client.post('/sdapi/v1/process-batch', { body: clean({ ...args }) });
-      const out = { ...data };
-      if (args.save_dir && Array.isArray(data?.images)) out.saved_files = saveImages(data.images, { dir: args.save_dir });
-      return out;
+      const needsBytes = !!args.save_dir || resolveReturnImages(args);
+      const { return_images, ...rest } = args;
+      const body = clean({ ...rest, show_extras_results: needsBytes ? true : rest.show_extras_results });
+      const data = await client.post('/sdapi/v1/process-batch', { body });
+      const { images, ...dataRest } = data ?? {};
+      return shapeImageResult(images, args, dataRest);
     },
   });
 
@@ -138,12 +194,95 @@ export function register(server) {
       detailer_merge: z.boolean().optional(), detailer_sort: z.boolean().optional(),
       detailer_sigma_adjust: z.number().optional(), detailer_sigma_adjust_max: z.number().optional(),
       detailer_include_detections: z.boolean().optional(), save_dir: z.string().optional(),
+      ...returnImagesField,
     },
     handler: async (args) => {
-      const data = await client.post('/sdapi/v1/detail', { body: clean({ ...args }) });
-      const out = { ...data };
-      if (args.save_dir) { const imgs = [out.image, out.detections].filter(Boolean); out.saved_files = saveImages(imgs, { dir: args.save_dir }); }
-      return out;
+      const { return_images, ...rest } = args;
+      const data = await client.post('/sdapi/v1/detail', { body: clean(rest) });
+      const { image, detections, ...dataRest } = data ?? {};
+      return shapeImageResult([image, detections].filter(Boolean), args, dataRest);
+    },
+  });
+
+  // ── video generation ────────────────────────────────────────────────────
+  registerTool(server, {
+    name: 'sdnext_video',
+    title: 'Generate Video',
+    method: 'POST',
+    path: '/sdapi/v1/video',
+    description: 'Generate a video, or a single still frame, using a video model (SD.Next /sdapi/v1/video). Omit engine and model to drive the currently loaded checkpoint when it is video-capable; pass both (from sdnext_list_video_models) to load a registry model on demand. frames:1 produces still image(s) in the response `frames` array instead of a video. The generated video itself is never returned inline (no MCP content type for video, and files are far too large) — pass save_dir to write it to disk; the thumbnail (and any still frames) are shown inline like other generation tools, subject to return_images/SDNEXT_MAX_IMAGES.',
+    inputSchema: {
+      engine: z.string().optional().describe('Video engine family; omit together with model to use the currently loaded checkpoint.'),
+      model: z.string().optional().describe('Video model name within the engine; see sdnext_list_video_models.'),
+      prompt: z.string().describe('Text prompt.'),
+      negative_prompt: z.string().optional().describe('Negative text prompt.'),
+      styles: z.array(z.string()).optional().describe('Prompt style names to apply.'),
+      width: z.number().int().optional().describe('Output width; snapped to the model canvas multiple (default 832).'),
+      height: z.number().int().optional().describe('Output height; snapped to the model canvas multiple (default 480).'),
+      frames: z.number().int().optional().describe('Number of frames; 1 produces a still image on workflow models (default 17).'),
+      steps: z.number().int().optional().describe('Number of inference steps (default 50).'),
+      sampler_name: z.string().optional().describe('Sampler name; "Default" keeps the model scheduler.'),
+      sampler_shift: z.number().optional().describe('Scheduler flow shift; -1 keeps the model default.'),
+      dynamic_shift: z.boolean().optional().describe('Enable dynamic scheduler shifting.'),
+      seed: z.number().int().optional().describe('Generation seed; -1 for random.'),
+      guidance_scale: z.number().optional().describe('CFG scale; -1 keeps the model default.'),
+      guidance_true: z.number().optional().describe('True CFG scale; -1 keeps the model default.'),
+      init_image: z.string().optional().describe('Base64 or data URI for the first-frame image (image-to-video).'),
+      init_strength: z.number().optional().describe('Denoising strength for the init image (default 0.8).'),
+      last_image: z.string().optional().describe('Base64 or data URI for the last-frame image.'),
+      references: z.array(z.string()).optional().describe('Reference images for a reference workflow, in model read order.'),
+      vae_type: z.string().optional().describe('Decode variant: Default, Tiny, Remote, or Upscale.'),
+      vae_tile_frames: z.number().int().optional().describe('Frames per VAE decode tile (default 16).'),
+      audio: z.boolean().optional().describe('Generate audio on models that support it (default true).'),
+      mp4_fps: z.number().int().optional().describe('Frames per second of the saved video (default 24).'),
+      mp4_interpolate: z.number().int().optional().describe('RIFE interpolation passes between frames.'),
+      mp4_codec: z.string().optional().describe('Video codec; "none" skips video encoding (default "libx264").'),
+      mp4_ext: z.string().optional().describe('Container extension; also used as the local save file extension (default "mp4").'),
+      mp4_opt: z.string().optional().describe('Encoder options as key=value pairs separated by : or , (default "crf=16").'),
+      mp4_video: z.boolean().optional().describe('Write the video container to disk on the SD.Next server itself (default true) — separate from this tool\'s own save_dir.'),
+      mp4_frames: z.boolean().optional().describe('Write individual frame images to disk on the SD.Next server itself.'),
+      mp4_sf: z.boolean().optional().describe('Write raw frames as a safetensors file on the SD.Next server itself.'),
+      mp4_thumb: z.boolean().optional().describe('Write a thumbnail image next to the video on the SD.Next server itself (default true).'),
+      override_settings: z.record(z.any()).optional().describe('Setting overrides applied for this generation only.'),
+      script_args: z.array(z.any()).optional().describe('Positional arguments for a selectable script.'),
+      alwayson_scripts: z.record(z.array(z.any())).optional().describe('Always-on script args keyed by script name.'),
+      extra: z.record(z.any()).optional().describe('Extra attributes set on the processing object.'),
+      save_dir: z.string().optional().describe('Local directory to write the generated video (and thumbnail) into (creates it).'),
+      ...returnImagesField,
+    },
+    handler: async (args) => {
+      const needsVideoBytes = !!args.save_dir;
+      const { return_images, save_dir, mp4_ext, ...rest } = args;
+      const body = clean({ ...rest, mp4_ext, send_video: needsVideoBytes ? true : rest.send_video });
+      const data = await client.post('/sdapi/v1/video', { body });
+      const { video, thumbnail, frames, ...meta } = data ?? {};
+
+      const videoSaved = video ? saveImages([video], { dir: save_dir, prefix: 'sdnext_video', fmt: mp4_ext || 'mp4' }) : [];
+      const thumbSaved = thumbnail ? saveImages([thumbnail], { dir: save_dir, prefix: 'sdnext_thumbnail', fmt: 'png' }) : [];
+
+      const wantInline = resolveReturnImages(args);
+      const cap = config.maxImagesInResponse;
+      const previewSource = [thumbnail, ...(Array.isArray(frames) ? frames : [])].filter(Boolean);
+      const embedded = wantInline ? previewSource.slice(0, cap) : [];
+
+      const summary = {
+        ...meta,
+        ...(videoSaved.length ? { saved_video: videoSaved } : {}),
+        ...(thumbSaved.length ? { saved_thumbnail: thumbSaved } : {}),
+        ...(video && !save_dir
+          ? { note: 'Video bytes were generated but not saved — pass save_dir to write the video to disk (too large to return inline; there is no MCP video content type).' }
+          : {}),
+        ...(wantInline && previewSource.length > embedded.length
+          ? { preview_note: `Showing ${embedded.length} of ${previewSource.length} preview image(s) inline (SDNEXT_MAX_IMAGES=${cap}).` }
+          : {}),
+      };
+
+      return {
+        __mcpContent: [
+          { type: 'text', text: JSON.stringify(summary, null, 2) },
+          ...imageContent(embedded),
+        ],
+      };
     },
   });
 

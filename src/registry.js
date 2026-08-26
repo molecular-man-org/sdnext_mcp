@@ -30,8 +30,21 @@ export function registerTool(server, def) {
   });
 }
 
+// A handler may return { __mcpContent: [...] } to supply pre-built MCP content
+// blocks (e.g. mixing a text summary with image blocks) instead of a plain
+// JSON-serializable value — mirrors the __dryRun marker convention in client.js.
 export function ok(data) {
+  if (data && typeof data === 'object' && Array.isArray(data.__mcpContent)) {
+    return { content: data.__mcpContent };
+  }
   return { content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }] };
+}
+
+// Converts base64 PNG strings into MCP image content blocks, dropping invalid entries.
+export function imageContent(images = []) {
+  return images
+    .filter((b64) => typeof b64 === 'string' && b64.length)
+    .map((b64) => ({ type: 'image', data: b64, mimeType: 'image/png' }));
 }
 
 export function fail(e) {
