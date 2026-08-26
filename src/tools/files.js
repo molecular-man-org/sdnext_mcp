@@ -18,7 +18,7 @@ function get(name, title, description, path, schema) {
 function del(name, title, description, path, schema) {
   registerTool(srv, {
     name, title, description, method: 'DELETE', path,
-    inputSchema: schema ?? {},
+    inputSchema: schema,
     destructive: true,
     annotations: { readOnlyHint: false, destructiveHint: true },
     handler: (args) => client.del(path, { query: args && Object.keys(args).length ? args : undefined }),

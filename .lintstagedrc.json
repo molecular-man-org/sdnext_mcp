@@ -1,0 +1,5 @@
+{
+  "*.{json,yml,yaml}": ["prettier --write"],
+  "*.md": ["prettier --write", "markdownlint-cli2 --fix"],
+  "*.toml": ["taplo fmt"]
+}

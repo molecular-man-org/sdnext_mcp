@@ -1,0 +1,11 @@
+{
+  "config": {
+    "default": true,
+    // conflicts with prettier's proseWrap:"preserve" (one tool would want to
+    // hard-wrap prose, the other refuses to touch it) — drop it rather than
+    // fight the two tools on every future edit
+    "MD013": false
+  },
+  "globs": ["**/*.md"],
+  "ignores": ["node_modules/**", "coverage/**"]
+}

@@ -1,0 +1,4 @@
+exclude = ["node_modules/**", "coverage/**"]
+
+[formatting]
+align_entries = false

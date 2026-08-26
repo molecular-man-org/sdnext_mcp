@@ -50,17 +50,17 @@ SDNEXT_MCP_TRANSPORT=http SDNEXT_MCP_PORT=8787 node src/index.js
 
 ## Configuration (env vars)
 
-| Var | Default | Meaning |
-|---|---|---|
-| `SDNEXT_BASE_URL` | `http://127.0.0.1:7860` | WebUI address |
-| `SDNEXT_API_PATH` | `/sdapi/v1` | v1 prefix |
-| `SDNEXT_API_KEY` | — | Bearer token (highest priority) |
-| `SDNEXT_USERNAME` / `SDNEXT_PASSWORD` | — | HTTP Basic auth |
-| `SDNEXT_TIMEOUT_MS` | `300000` | Request timeout (generation is slow) |
-| `SDNEXT_MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
-| `SDNEXT_MCP_HOST` / `SDNEXT_MCP_PORT` | `127.0.0.1` / `8787` | HTTP transport bind |
-| `SDNEXT_MCP_DRY_RUN` | `false` | `1` = print requests, don't send |
-| `SDNEXT_SAVE_DIR` | — | Default dir for `save_dir` disk writes |
+| Var                                   | Default                 | Meaning                                |
+| ------------------------------------- | ----------------------- | -------------------------------------- |
+| `SDNEXT_BASE_URL`                     | `http://127.0.0.1:7860` | WebUI address                          |
+| `SDNEXT_API_PATH`                     | `/sdapi/v1`             | v1 prefix                              |
+| `SDNEXT_API_KEY`                      | —                       | Bearer token (highest priority)        |
+| `SDNEXT_USERNAME` / `SDNEXT_PASSWORD` | —                       | HTTP Basic auth                        |
+| `SDNEXT_TIMEOUT_MS`                   | `300000`                | Request timeout (generation is slow)   |
+| `SDNEXT_MCP_TRANSPORT`                | `stdio`                 | `stdio` or `http`                      |
+| `SDNEXT_MCP_HOST` / `SDNEXT_MCP_PORT` | `127.0.0.1` / `8787`    | HTTP transport bind                    |
+| `SDNEXT_MCP_DRY_RUN`                  | `false`                 | `1` = print requests, don't send       |
+| `SDNEXT_SAVE_DIR`                     | —                       | Default dir for `save_dir` disk writes |
 
 ## Tool families (125 total)
 
@@ -69,7 +69,7 @@ SDNEXT_MCP_TRANSPORT=http SDNEXT_MCP_PORT=8787 node src/index.js
 - **Image understanding** — `sdnext_caption`, `sdnext_caption_dispatch`, `sdnext_tagger`, `sdnext_vqa`, `sdnext_analyze`
 - **Models/options** — refresh/select/load checkpoint, VAE, UNet, LoRA; `sdnext_get_options`/`sdnext_set_options`
 - **Server** — `sdnext_status`, `sdnext_progress`, interrupt/skip, restart/shutdown, log, history, storage, GPU
-- **Files/Gallery** — `sdnext_upload`, `sdnext_file`, delete-*, browser/*, `sdnext_png_info`
+- **Files/Gallery** — `sdnext_upload`, `sdnext_file`, `delete-*`, `browser/*`, `sdnext_png_info`
 - **Control processing** — `sdnext_preprocess`, `sdnext_mask`, `sdnext_detect`
 - **Moderation** — `sdnext_nudenet`, `sdnext_prompt_lang`, `sdnext_image_guard`, `sdnext_prompt_banned`
 - **CivitAI** — search, model/version, download queue, settings, bookmarks, banned, history (27 tools)
@@ -79,7 +79,7 @@ Run `sdnext_list_tools` at runtime for the full catalog, or `node scripts/dump_t
 
 ## Typical workflow
 
-```
+```text
 sdnext_list_checkpoints   → pick a model
 sdnext_list_samplers      → pick a sampler
 sdnext_txt2img { prompt, sd_model_checkpoint, sampler_name, width:1024, height:1024, steps:20 }
@@ -97,6 +97,19 @@ node scripts/smoke.mjs # DRY_RUN stdio smoke test (no live server needed)
 node scripts/dump_tools.mjs  # export the tool catalog
 ```
 
+## Testing & linting
+
+```bash
+npm test              # run the unit test suite
+npm run coverage       # run tests with coverage; fails if any src/*.js file is under 80% branch coverage
+npm run lint            # check JSON/YAML/Markdown formatting + Markdown rules + TOML
+npm run lint:fix        # auto-fix the above
+```
+
+CI (`.github/workflows/ci.yml`) runs `npm run coverage` (per-file branch coverage gate) and `npm run lint`
+on every push/PR. A pre-commit hook (husky + lint-staged) auto-fixes JSON/YAML/Markdown/TOML formatting
+on staged files before each commit.
+
 ## Layout
 
-See `../framework/` for the architecture documentation (API facts in `01-sdnext-api/`, design decisions in `02-mcp-design/`). Source under `src/`: `config.js`, `client.js`, `image.js`, `registry.js`, `index.js`, and `tools/` (one file per domain).
+See `../framework/` for the architecture documentation (API facts in `01-sdnext-api/`, design decisions in `02-mcp-design/`). Source under `src/`: `config.js`, `client.js`, `image.js`, `registry.js`, `app.js` (builds the server and its transports), `index.js` (tiny CLI bootstrap), and `tools/` (one file per domain).

@@ -4,16 +4,38 @@
   "description": "Model Context Protocol (MCP) server for SD.Next — covers all SD.Next API usage scenarios (txt2img, img2img, process, caption, VQA, models, LoRA, options, history, CivitAI, ...)",
   "type": "module",
   "license": "MIT",
-  "bin": { "sdnext-mcp": "src/index.js" },
+  "bin": {
+    "sdnext-mcp": "src/index.js"
+  },
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "check": "node --check src/index.js && echo OK"
+    "check": "node --check src/index.js && echo OK",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "lint:json-yaml-md": "prettier --check \"**/*.{json,yml,yaml,md}\"",
+    "lint:md": "markdownlint-cli2",
+    "lint:toml": "taplo lint && taplo fmt --check",
+    "lint": "npm run lint:json-yaml-md && npm run lint:md && npm run lint:toml",
+    "lint:fix": "prettier --write \"**/*.{json,yml,yaml,md}\" && markdownlint-cli2 --fix && taplo fmt",
+    "prepare": "husky || true"
   },
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@taplo/cli": "^0.7.0",
+    "@vitest/coverage-v8": "^3.2.7",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.3.0",
+    "markdownlint-cli2": "^0.23.2",
+    "prettier": "^3.9.6",
+    "vitest": "^3.2.7"
   }
 }

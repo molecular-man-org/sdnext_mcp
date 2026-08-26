@@ -13,11 +13,10 @@ function get(name, title, description, path, schema) {
     handler: (args) => client.get(path, { query: args && Object.keys(args).length ? args : undefined }),
   });
 }
-function post(name, title, description, path, schema, opts = {}) {
+function post(name, title, description, path, schema) {
   registerTool(srv, {
     name, title, description, method: 'POST', path,
     inputSchema: schema ?? {},
-    ...(opts.destructive ? { destructive: true, annotations: { readOnlyHint: false, destructiveHint: true } } : {}),
     handler: (args) => client.post(path, { body: args }),
   });
 }
