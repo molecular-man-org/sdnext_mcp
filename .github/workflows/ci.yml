@@ -8,7 +8,9 @@ on:
 jobs:
   test:
     name: Test (Node ${{ matrix.node-version }})
-    runs-on: ubuntu-latest
+    # On-prem runner pool first (cron-runner2: see molecular-man-org/ai-studio docs/CI_RUNNERS.md); the free
+    # GitHub-hosted runner also works, so reverting this one line is always safe.
+    runs-on: [self-hosted, Linux, X64]
     strategy:
       matrix:
         node-version: [18.x, 22.x]
@@ -24,7 +26,9 @@ jobs:
 
   lint:
     name: Lint (JSON / Markdown / YAML / TOML)
-    runs-on: ubuntu-latest
+    # On-prem runner pool first (cron-runner2: see molecular-man-org/ai-studio docs/CI_RUNNERS.md); the free
+    # GitHub-hosted runner also works, so reverting this one line is always safe.
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
