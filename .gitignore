@@ -4,3 +4,7 @@ coverage/
 # Personal agent files, never shared (REPO-2)
 .claude/settings.local.json
 CLAUDE.local.md
+
+# What the kit's checks write, so they leave the checkout clean (TMP-5)
+.tools/
+__pycache__/
