@@ -9,6 +9,133 @@
   "check_command": "scripts/check.sh",
   "ci_runners": ["ubuntu-latest"],
   "exceptions": [],
-  "attested": [],
+  "attested": [
+    {
+      "rule": "REPO-6",
+      "result": "pass",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "git ls-files lists only src/, test/, docs/, tooling config and lockfile; no data, personal or resume folders; test prompts are synthetic (test/client.test.js:65)"
+    },
+    {
+      "rule": "REPO-7",
+      "result": "pass",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "main is linear since adoption: head merge commit e7134ea (PR 2) has first parent f3fef10, the pre-adoption head; git log --first-parent shows no rewrite"
+    },
+    {
+      "rule": "AGENT-3",
+      "result": "pass",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "CLAUDE.md Rules section: every rule bullet ends with a 'Why:' sentence (13 Why lines)"
+    },
+    {
+      "rule": "CI-9",
+      "result": "pass",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "git log --diff-filter=D -- test shows no deleted test file; grep for .skip/.only/xit in test/ finds none"
+    },
+    {
+      "rule": "DEP-6",
+      "result": "pass",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "scripts/ci-tools.sh:11-12 pins actionlint and gitleaks versions and verifies each download against a recorded sha256 (lines 31-39); ci.yml downloads nothing else"
+    },
+    {
+      "rule": "TEST-6",
+      "result": "pass",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "tests stub fetch (test/client.test.js:14) and use loopback 127.0.0.1 only (test/client.test.js:8); ci.yml has no secrets references"
+    },
+    {
+      "rule": "SEC-2",
+      "result": "pass",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "git ls-files has no env, key or credential file; grep for credential assignments in tracked files finds none; password is read from environment (src/config.js:18); gitleaks runs in scripts/standard-checks.sh:33-34"
+    },
+    {
+      "rule": "SEC-3",
+      "result": "pass",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "no allowlist exists: no gitleaks config in git ls-files (only .gitignore and .prettierignore as ignore files)"
+    },
+    {
+      "rule": "SEC-4",
+      "result": "pass",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "the only workflow is .github/workflows/ci.yml (tests and lint); none destroys data"
+    },
+    {
+      "rule": "SEC-5",
+      "result": "pass",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "grep for translate/deepl in src/ finds nothing; the only outbound calls go to the configured SD.Next URL (src/client.js:60,109; src/tools/files.js:62)"
+    },
+    {
+      "rule": "BKP-10",
+      "result": "pass",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "git holds code, docs and config only (see REPO-6); no content or data files tracked"
+    },
+    {
+      "rule": "AGENT-6",
+      "result": "pass",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "git log: every AI-written commit (a88ed66, c851880, d48f121, f3fef10, 9aa2f35) ends with a Co-Authored-By trailer; the two without one are the upstream author's initial commit 43d89a3 and GitHub's merge commit e7134ea"
+    },
+    {
+      "rule": "REPO-9",
+      "result": "pass",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "the only merged PR (#2) landed as merge commit e7134ea with two parents. Note: repository settings still allow squash and rebase merges"
+    },
+    {
+      "rule": "TMP-4",
+      "result": "pass",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "ci.yml writes no fixed scratch path; scripts/ci-tools.sh:16 installs tools under $RUNNER_TEMP/bin in CI"
+    },
+    {
+      "rule": "LOG-2",
+      "result": "pass",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "logging is console.error at src/app.js:45,60,65 only (transport, base URL, error); the password is used only in authHeader (src/config.js:29-33) and never logged"
+    },
+    {
+      "rule": "LOG-4",
+      "result": "fail",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "src/app.js:60 logs the raw error with no code or request id; no request id exists anywhere in src/"
+    },
+    {
+      "rule": "UPD-2",
+      "result": "fail",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "no scheduled vulnerability scan: ci.yml has no schedule trigger or npm audit step; .github/dependabot.yml covers github-actions only, not npm"
+    },
+    {
+      "rule": "CI-11",
+      "result": "fail",
+      "by": "overnight agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "no required checks on the default branch: branch protection API returns 404 Branch not protected and the repository has no rulesets"
+    }
+  ],
   "predates_standard": true
 }

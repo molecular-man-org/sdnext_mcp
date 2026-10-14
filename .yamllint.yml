@@ -9,3 +9,8 @@ rules:
     check-keys: false
   comments:
     min-spaces-from-content: 1
+
+# Installed packages are not the project's files.
+ignore: |
+  node_modules/
+  coverage/
