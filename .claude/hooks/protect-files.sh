@@ -31,7 +31,7 @@ for pattern in "${PROTECTED[@]}"; do
       exit 2
       ;;
   esac
-  # shellcheck disable=SC2254
+  # shellcheck disable=SC2254  # patterns are meant to glob
   case "$base_name" in
     $pattern)
       echo "Blocked: $rel_path matches protected pattern '$pattern' (.claude/hooks/protect-files.sh)." >&2

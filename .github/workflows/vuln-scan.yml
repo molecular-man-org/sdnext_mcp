@@ -1,0 +1,38 @@
+name: Vulnerability scan
+
+# Rule UPD-2: the lockfiles are scanned for known vulnerabilities every week,
+# and each finding becomes an issue with its due date (scripts/vuln-scan.py).
+# Run it by hand too before a release. The scan is offline: osv-scanner
+# downloads the public database and compares here, so the package list never
+# leaves the runner. Findings never turn this red; a scan that cannot run does.
+on:
+  schedule:
+    - cron: "17 11 * * 1" # Mondays, 7:17 AM Eastern (summer time)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan the lockfiles
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned tools
+        env:
+          CI_TOOLS_SCANNER: "1"
+        run: scripts/ci-tools.sh
+
+      - name: Scan, and match the issues to the findings
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY: ${{ runner.temp }}/osv-db
+        run: python3 scripts/vuln-scan.py --issues

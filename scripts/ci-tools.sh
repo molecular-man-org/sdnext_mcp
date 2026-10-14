@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Install the pinned command-line tools the checks need (actionlint and
 # gitleaks) into one folder, verifying each download against the checksum its
-# release published. Works on Linux and macOS, x64 and arm64.
+# release published. Works on Linux and macOS, x64 and arm64. With
+# CI_TOOLS_SCANNER=1 it also installs osv-scanner, for the weekly
+# vulnerability scan (scripts/vuln-scan.py); the checks do not need it.
 #
 # Usage: scripts/ci-tools.sh [folder]
 # Default folder: $RUNNER_TEMP/bin in CI, .tools/bin otherwise. In CI the
@@ -12,6 +14,7 @@ set -euo pipefail
 
 ACTIONLINT_VERSION=1.7.12
 GITLEAKS_VERSION=8.30.1
+OSV_SCANNER_VERSION=2.7.0
 
 dest=${1:-${RUNNER_TEMP:-$PWD/.tools}/bin}
 mkdir -p "$dest"
@@ -36,6 +39,10 @@ expected() {
     gitleaks_linux_arm64) echo e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080 ;;
     gitleaks_darwin_amd64) echo dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a18081af1952709 ;;
     gitleaks_darwin_arm64) echo b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5 ;;
+    osv-scanner_linux_amd64) echo 160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b ;;
+    osv-scanner_linux_arm64) echo 4061ef4c021ed3c47f203b818f337e351336cc5cd67c0274fc36bd1dfc728dd7 ;;
+    osv-scanner_darwin_amd64) echo e82c5df7ab0a42dff29a1cd0660711447b56b4c0483ff66ad8634df10fd81a45 ;;
+    osv-scanner_darwin_arm64) echo d4926ef8da134332543be276dff157e4c170f99ad91fc48e89448a8816bdf70b ;;
     *)
       echo "no checksum recorded for $1" >&2
       return 1
@@ -53,19 +60,23 @@ sha256() {
 
 install_tool() {
   local tool=$1 version=$2 url=$3 want work
-  if [ -x "$dest/$tool" ] && "$dest/$tool" version 2>/dev/null | grep -q "$version"; then
+  if [ -x "$dest/$tool" ] && { "$dest/$tool" version 2>/dev/null || "$dest/$tool" --version 2>/dev/null; } | grep -q "$version"; then
     echo "$tool $version is already in $dest"
     return 0
   fi
   want=$(expected "${tool}_${os}_${arch}")
   work=$(mktemp -d)
-  curl -fsSL -o "$work/archive.tar.gz" "$url"
-  if [ "$(sha256 "$work/archive.tar.gz")" != "$want" ]; then
+  curl -fsSL -o "$work/download" "$url"
+  if [ "$(sha256 "$work/download")" != "$want" ]; then
     echo "checksum mismatch for $url" >&2
     rm -rf "$work"
     return 1
   fi
-  tar -xzf "$work/archive.tar.gz" -C "$work" "$tool"
+  case "$url" in
+    *.tar.gz) tar -xzf "$work/download" -C "$work" "$tool" ;;
+    *) mv "$work/download" "$work/$tool" ;; # a bare binary
+  esac
+  chmod +x "$work/$tool"
   mv "$work/$tool" "$dest/$tool"
   rm -rf "$work"
   echo "installed $tool $version into $dest"
@@ -79,6 +90,10 @@ install_tool actionlint "$ACTIONLINT_VERSION" \
   "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${os}_${arch}.tar.gz"
 install_tool gitleaks "$GITLEAKS_VERSION" \
   "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_${os}_${gitleaks_arch}.tar.gz"
+if [ "${CI_TOOLS_SCANNER:-}" = 1 ]; then
+  install_tool osv-scanner "$OSV_SCANNER_VERSION" \
+    "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_${os}_${arch}"
+fi
 
 if [ -n "${GITHUB_PATH:-}" ]; then
   echo "$dest" >>"$GITHUB_PATH"
