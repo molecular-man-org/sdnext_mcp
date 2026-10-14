@@ -49,7 +49,7 @@ if [ "$after_update" = 0 ]; then
 fi
 
 # The kit's own files: everything an update is allowed to rewrite.
-kit='^(\.copier-answers\.yml|standard-baseline\.json|scripts/(standard_check\.py|standard-checks\.sh|ci-tools\.sh|ci-verdict\.py|pr_flow\.py|fix_workflows\.py|fix_standard\.py|format-check\.sh|lint-check\.sh|lane-fix\.sh|kit-update\.sh|vuln-scan\.py|dep_merge\.py)|docs/phone-app-decisions\.md|e2e/kit/|\.claude/(hooks|agents|skills)/|\.github/workflows/(builder-(sync|cleanup)[^/]*|vuln-scan|dependency-merge)\.yml)'
+kit='^(\.copier-answers\.yml|standard-baseline\.json|scripts/(standard_check\.py|standard-checks\.sh|ci-tools\.sh|ci-verdict\.py|pr_flow\.py|fix_workflows\.py|fix_standard\.py|format-check\.sh|lint-check\.sh|lane-fix\.sh|kit-update\.sh|vuln-scan\.py|dep_merge\.py|work\.py)|docs/phone-app-decisions\.md|e2e/kit/|\.claude/(hooks|agents|skills)/|\.github/workflows/(builder-(sync|cleanup)[^/]*|vuln-scan|dependency-merge)\.yml)'
 changed=$(git status --porcelain | cut -c4-)
 others=$(printf '%s\n' "$changed" | grep -v -E "$kit" | grep -v '^$' || true)
 
