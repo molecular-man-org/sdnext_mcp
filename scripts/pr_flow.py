@@ -192,6 +192,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1
         if not args.repo:
             cleanup(branch)
+        else:  # another repository: no local checkout to tidy, but the merged branch goes (GitHub may have done it)
+            sh(["gh", "api", "-X", "DELETE", f"repos/{args.repo}/git/refs/heads/{branch}"], check=False)
         return 0
     except RuntimeError as error:
         print(error, file=sys.stderr)
