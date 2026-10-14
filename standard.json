@@ -236,10 +236,10 @@
     },
     {
       "rule": "LOG-5",
-      "result": "fail",
+      "result": "pass",
       "by": "agent (Sonnet), 2026-10-14",
       "date": "2026-10-14",
-      "evidence": "Logs are console.error to stderr only (src/app.js:45,60,65); no document states how long they are kept, where, or who can read them (README.md and docs/ searched)"
+      "evidence": "README.md section 'Logs': server writes no log files, only stderr lines (src/app.js:45,60,65); states what, where, who can read, that retention is whatever the process's host keeps, and GitHub's default 90 days for CI logs"
     }
   ],
   "predates_standard": true,
