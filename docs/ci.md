@@ -5,7 +5,7 @@ every pull request, as two independent jobs:
 
 | Job    | What it does                                                                                                                                                                                      |
 | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `test` | Matrix over Node `18.x` and `22.x` (the package's declared minimum, and current LTS). `npm ci`, then `npm run coverage` — fails the build if any `src/**/*.js` file is under 80% branch coverage. |
+| `test` | Matrix over Node `20.x` and `22.x` (the package's declared minimum, and current LTS). `npm ci`, then `npm run coverage` — fails the build if any `src/**/*.js` file is under 80% branch coverage. |
 | `lint` | Single run on Node `22.x`. `npm ci`, then `npm run lint` (Prettier + markdownlint-cli2 + Taplo).                                                                                                  |
 
 Both jobs use `actions/checkout@v4` and `actions/setup-node@v4` with `cache: npm`, and both run
@@ -17,7 +17,7 @@ ever drift out of sync, rather than silently resolving something different than 
 Splitting `test` and `lint` means they run in parallel and fail independently and legibly in the
 GitHub UI — a red "Lint" check tells you immediately it's a formatting problem, not a logic
 regression, without having to open the log. The `test` job's matrix over two Node versions exists
-because this package declares `"engines": { "node": ">=18" }`; the matrix is what actually verifies
+because this package declares `"engines": { "node": ">=20" }`; the matrix is what actually verifies
 that claim rather than just asserting it in `package.json`.
 
 ## Verifying changes to this workflow
