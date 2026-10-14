@@ -8,6 +8,8 @@
 What it fixes, each only when the checker finds it missing, and always by adding, never by rewriting:
 - AGENT-1: `CLAUDE.md` names the check command (a short "Checks" section at the end).
 - REPO-2: `.gitignore` ignores the personal agent files (`.claude/settings.local.json`, `CLAUDE.local.md`).
+- TMP-5: `.gitignore` ignores what the kit's checks write (`.tools/`, `__pycache__/`, and with `e2e/` the browser
+  tests' output), so a run leaves the checkout clean.
 - REPO-3: `.gitattributes` sets LF line endings (`* text=auto eol=lf`).
 - The kit's own Python scripts are left out of the project's ruff and coverage settings in `pyproject.toml`, where
   those sections exist (the kit tests them; a project's gates otherwise fail on them).
@@ -43,11 +45,20 @@ def claude_md(repo: sc.Repo, root: Path) -> Optional[Fix]:
 
 def gitignore(repo: sc.Repo, root: Path) -> Optional[Fix]:
     text = repo.read(".gitignore") if repo.has(".gitignore") else ""
-    missing = [line for line in (".claude/settings.local.json", "CLAUDE.local.md") if line not in text]
-    if not missing:
+    present = {line.strip().lstrip("/") for line in text.splitlines()}
+    groups = [("Personal agent files, never shared (REPO-2)", "REPO-2", [".claude/settings.local.json", "CLAUDE.local.md"]),
+              ("What the kit's checks write, so they leave the checkout clean (TMP-5)", "TMP-5",
+               [".tools/", "__pycache__/"] + (["test-results/", "browser-report.json", "playwright-report/"]
+                                              if any(name.startswith("e2e/") for name in repo.files) else []))]
+    added, done = "", []
+    for heading, rule, lines in groups:
+        missing = [line for line in lines if line not in present and line.rstrip("/") not in present]
+        if missing:
+            added += f"\n# {heading}\n" + "\n".join(missing) + "\n"
+            done.append(f"{rule}: " + ", ".join(missing))
+    if not added:
         return None
-    lines = "\n# Personal agent files, never shared (REPO-2)\n" + "\n".join(missing) + "\n"
-    return ".gitignore", (text.rstrip("\n") + "\n" if text else "") + lines, "REPO-2: " + ", ".join(missing)
+    return ".gitignore", (text.rstrip("\n") + "\n" if text else "") + added, "; ".join(done)
 
 
 def line_endings(repo: sc.Repo, root: Path) -> Optional[Fix]:

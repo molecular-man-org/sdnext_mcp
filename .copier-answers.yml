@@ -1,6 +1,6 @@
 # Written by Copier. Records which version of the template this project has.
 # Do not edit by hand; run `copier update` instead.
-_commit: v1.2.7
+_commit: v1.2.9
 _src_path: https://github.com/molecular-man-org/claude-repo-template.git
 accounts: false
 category: tools
