@@ -63,7 +63,8 @@ DEFAULT_BUILDER_AUTHORS = ["gpt-engineer-app[bot]", "lovable-dev[bot]", "Lovable
 
 SOURCE_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs")
 # Files the template puts into a project. They are not the project's own code.
-TEMPLATE_OWNED = ("scripts/standard_check.py", "scripts/ci-verdict.py", "scripts/pr_flow.py", "scripts/fix_workflows.py", "scripts/fix_standard.py")
+TEMPLATE_OWNED = ("scripts/standard_check.py", "scripts/ci-verdict.py", "scripts/pr_flow.py", "scripts/fix_workflows.py", "scripts/fix_standard.py",
+                  "scripts/vuln-scan.py")
 # The owner's categories (2026-10-13). One per app; it sets the defaults for `exposure` and `accounts`, and the
 # last two are out of scope for this standard.
 CATEGORIES: Dict[str, Dict[str, object]] = {
@@ -2339,24 +2340,14 @@ def _json_span(text: str, start: int) -> int:
     raise ValueError("unbalanced JSON")
 
 
-def attest(record_path: Path, rule_id: str, result: str, evidence: str, by: str) -> int:
-    """Record a manual rule's result in standard.json, changing only that entry's text (the rest keeps its layout)."""
-    if rule_id not in {rule.id for rule in RULES}:
-        print(f"unknown rule: {rule_id}", file=sys.stderr)
-        return 2
-    if result not in ("pass", "fail"):
-        print(f"the result is pass or fail, not {result}", file=sys.stderr)
-        return 2
-    if not evidence.strip() or not by.strip():
-        print("evidence and --by are required: a result without them cannot be checked", file=sys.stderr)
-        return 2
+def _record_entry(record_path: Path, field: str, rule_id: str, entry: Dict[str, str]) -> int:
+    """Put `entry` in the list `field` of standard.json, replacing that rule's entry; only that text changes."""
     text = record_path.read_text(encoding="utf-8")
     data = json.loads(text)
     if not isinstance(data, dict):
         print(f"{record_path} is not a JSON object", file=sys.stderr)
         return 2
-    entry = {"rule": rule_id, "result": result, "by": by, "date": datetime.date.today().isoformat(), "evidence": evidence}
-    key = re.search(r'"attested"\s*:\s*\[', text)
+    key = re.search(r'"' + field + r'"\s*:\s*\[', text)
     if key:
         open_at = key.end() - 1
         close_at = _json_span(text, open_at) - 1
@@ -2387,14 +2378,55 @@ def attest(record_path: Path, rule_id: str, result: str, evidence: str, by: str)
         last_brace = text.rstrip().rfind("}")
         before = text[:last_brace].rstrip()
         rendered = json.dumps(entry, indent=2, ensure_ascii=False).replace("\n", "\n    ")
-        new_text = before + ',\n  "attested": [\n    ' + rendered + "\n  ]\n" + text[last_brace:]
+        new_text = before + ',\n  "' + field + '": [\n    ' + rendered + "\n  ]\n" + text[last_brace:]
     check = json.loads(new_text)
-    held = [e for e in check.get("attested", []) if isinstance(e, dict) and e.get("rule") == rule_id]
-    if held != [entry] or {k: v for k, v in check.items() if k != "attested"} != {k: v for k, v in data.items() if k != "attested"}:
+    held = [e for e in check.get(field, []) if isinstance(e, dict) and e.get("rule") == rule_id]
+    if held != [entry] or {k: v for k, v in check.items() if k != field} != {k: v for k, v in data.items() if k != field}:
         print("the edit did not come out as intended; nothing was written", file=sys.stderr)
         return 2
     record_path.write_text(new_text, encoding="utf-8")
+    return 0
+
+
+
+
+def attest(record_path: Path, rule_id: str, result: str, evidence: str, by: str) -> int:
+    """Record a manual rule's result in standard.json, changing only that entry's text (the rest keeps its layout)."""
+    if rule_id not in {rule.id for rule in RULES}:
+        print(f"unknown rule: {rule_id}", file=sys.stderr)
+        return 2
+    if result not in ("pass", "fail"):
+        print(f"the result is pass or fail, not {result}", file=sys.stderr)
+        return 2
+    if not evidence.strip() or not by.strip():
+        print("evidence and --by are required: a result without them cannot be checked", file=sys.stderr)
+        return 2
+    entry = {"rule": rule_id, "result": result, "by": by, "date": datetime.date.today().isoformat(), "evidence": evidence}
+    if _record_entry(record_path, "attested", rule_id, entry):
+        return 2
     print(f"recorded {rule_id} {result} by {by} in {record_path.name}")
+    return 0
+
+
+def waive(record_path: Path, rule_id: str, reason: str, approved_by: str, date: str) -> int:
+    """Record the owner's waiver of a rule under `exceptions` in standard.json, changing nothing else.
+
+    A waiver is the owner's decision: `approved_by` names him and `date` is the day he decided, never the day it is
+    written down. It covers a rule while that rule fails (a manual rule: once its fail is recorded with --attest).
+    """
+    if rule_id not in {rule.id for rule in RULES}:
+        print(f"unknown rule: {rule_id}", file=sys.stderr)
+        return 2
+    if rule_id in NEVER_EXCEPTED:
+        print(f"{rule_id} cannot be excepted", file=sys.stderr)
+        return 2
+    if not reason.strip() or not approved_by.strip() or not re.match(r"\d{4}-\d{2}-\d{2}\Z", date):
+        print("a reason, --approved-by and --date YYYY-MM-DD (the day the owner decided) are required", file=sys.stderr)
+        return 2
+    entry = {"rule": rule_id, "reason": reason, "approved_by": approved_by, "date": date}
+    if _record_entry(record_path, "exceptions", rule_id, entry):
+        return 2
+    print(f"recorded the waiver of {rule_id} by {approved_by} ({date}) in {record_path.name}")
     return 0
 
 
@@ -2569,6 +2601,12 @@ def run(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--by", help="with --attest: who judged it")
     parser.add_argument(
+        "--waive", nargs=2, metavar=("RULE", "REASON"),
+        help="record the owner's waiver of a rule under exceptions in standard.json, changing nothing else",
+    )
+    parser.add_argument("--approved-by", help="with --waive: who waived it (the owner)")
+    parser.add_argument("--date", help="with --waive: the day the owner decided, YYYY-MM-DD")
+    parser.add_argument(
         "--files",
         choices=("builder", "other"),
         help="list the files the UI builder writes (its screens and their tests), or every other file, one per line",
@@ -2588,6 +2626,10 @@ def run(argv: Optional[List[str]] = None) -> int:
     if args.attest:
         rule_id, result, evidence = args.attest
         return attest(Path(args.record) if args.record else root / "standard.json", rule_id, result, evidence, args.by or "")
+    if args.waive:
+        rule_id, reason = args.waive
+        return waive(Path(args.record) if args.record else root / "standard.json", rule_id, reason,
+                     args.approved_by or "", args.date or "")
     if args.to_judge:
         return to_judge(repo, args.since)
     if args.lane_guard:
