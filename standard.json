@@ -124,10 +124,10 @@
     },
     {
       "rule": "UPD-2",
-      "result": "fail",
-      "by": "overnight agent (Sonnet), 2026-10-14",
+      "result": "pass",
+      "by": "claude-repo-template session (Opus), 2026-10-14",
       "date": "2026-10-14",
-      "evidence": "no scheduled vulnerability scan: ci.yml has no schedule trigger or npm audit step; .github/dependabot.yml covers github-actions only, not npm"
+      "evidence": ".github/workflows/vuln-scan.yml (kit v1.3.4) runs osv-scanner weekly and files one labelled issue per vulnerable package version with its due date; its run on 2026-10-14 succeeded"
     },
     {
       "rule": "CI-11",
