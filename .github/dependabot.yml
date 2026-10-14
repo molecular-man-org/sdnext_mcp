@@ -7,3 +7,12 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 1 # DEP-3: nothing younger than a day
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]

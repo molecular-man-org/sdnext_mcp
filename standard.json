@@ -242,5 +242,9 @@
       "evidence": "Logs are console.error to stderr only (src/app.js:45,60,65); no document states how long they are kept, where, or who can read them (README.md and docs/ searched)"
     }
   ],
-  "predates_standard": true
+  "predates_standard": true,
+  "dependency_automerge": {
+    "approved_by": "THE-MOLECULAR-MAN",
+    "date": "2026-10-14"
+  }
 }

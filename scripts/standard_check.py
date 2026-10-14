@@ -64,7 +64,7 @@ DEFAULT_BUILDER_AUTHORS = ["gpt-engineer-app[bot]", "lovable-dev[bot]", "Lovable
 SOURCE_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs")
 # Files the template puts into a project. They are not the project's own code.
 TEMPLATE_OWNED = ("scripts/standard_check.py", "scripts/ci-verdict.py", "scripts/pr_flow.py", "scripts/fix_workflows.py", "scripts/fix_standard.py",
-                  "scripts/vuln-scan.py")
+                  "scripts/vuln-scan.py", "scripts/dep_merge.py")
 # The owner's categories (2026-10-13). One per app; it sets the defaults for `exposure` and `accounts`, and the
 # last two are out of scope for this standard.
 CATEGORIES: Dict[str, Dict[str, object]] = {

@@ -1,0 +1,33 @@
+---
+name: Dependency merge
+
+# Merges Dependabot's pull requests once they are 24 hours old and every check
+# passed, where standard.json carries the owner's go-ahead
+# (dependency_automerge). Everywhere else it only says that it is off.
+on: # yamllint disable-line rule:truthy
+  schedule:
+    - cron: "23 */6 * * *" # every six hours
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  merge:
+    name: Merge passing dependency updates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      statuses: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Merge what is ready
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/dep_merge.py
