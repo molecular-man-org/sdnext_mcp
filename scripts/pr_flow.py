@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -41,13 +42,19 @@ def sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
+def server_error(error: Exception) -> bool:
+    """A GitHub server error (5xx), which says nothing about the request: gh words it "HTTP 502" or "504 Gateway"."""
+    return bool(re.search(r"HTTP 5\d\d|\b5\d\d (Bad Gateway|Gateway Time-?out|Service Unavailable|Internal Server)",
+                          str(error), re.IGNORECASE))
+
+
 def gh_json(args: List[str], repo: Optional[str]) -> Any:
     """A gh call's JSON. A GitHub server error (HTTP 5xx) is retried a few times before it counts."""
     for attempt in range(4):
         try:
             return json.loads(sh(["gh", *args, *(["--repo", repo] if repo else [])]) or "null")
         except RuntimeError as error:
-            if "HTTP 5" not in str(error) or attempt == 3:
+            if not server_error(error) or attempt == 3:
                 raise
             sleep(5 * (attempt + 1))
     return None
@@ -109,15 +116,21 @@ def merge(number: str, repo: Optional[str], say: Callable[[str], None] = print) 
         return None
     if pr.get("isDraft"):
         sh(["gh", "pr", "ready", number, *(["--repo", repo] if repo else [])])
-    sh(["gh", "pr", "merge", number, "--merge", "--match-head-commit", pr["headRefOid"],
-        *(["--repo", repo] if repo else [])])
-    for _ in range(10):
-        pr = pull_request(number, repo)
-        oid = (pr.get("mergeCommit") or {}).get("oid")
-        if pr["state"] == "MERGED" and oid:
-            say(f"#{number} merged as {oid[:7]}")
-            return str(oid)
-        sleep(3)
+    for attempt in range(3):
+        try:
+            sh(["gh", "pr", "merge", number, "--merge", "--match-head-commit", pr["headRefOid"],
+                *(["--repo", repo] if repo else [])])
+        except RuntimeError as error:
+            if not server_error(error) or attempt == 2:
+                raise
+            say(f"#{number}: GitHub answered with a server error; looking whether it merged all the same")
+        for _ in range(10):
+            now = pull_request(number, repo)
+            oid = (now.get("mergeCommit") or {}).get("oid")
+            if now["state"] == "MERGED" and oid:
+                say(f"#{number} merged as {oid[:7]}")
+                return str(oid)
+            sleep(3)
     say(f"#{number} did not show as merged")
     return None
 

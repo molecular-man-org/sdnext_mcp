@@ -8,8 +8,8 @@
 The scan is osv-scanner (installed by `scripts/ci-tools.sh`) in offline mode: it downloads the public vulnerability
 database and compares the lockfiles here, so the project's package list never leaves the machine.
 
-One issue per vulnerability and package version, labelled `security`, with its due date from the standard's time
-limits (UPD-3) by the record's `exposure`: public apps get the shorter limits. Only issues this script opened (they
+One issue per package version, listing every advisory against it, labelled `security`, with its due date from the
+standard's time limits (UPD-3) by the record's `exposure`: public apps get the shorter limits. Only issues this script opened (they
 carry a marker line) are ever changed by it: a finding no longer found is closed with a comment; a closed one found
 again is reopened. Findings never fail the run: they become issues. A scan that cannot run fails it.
 
@@ -66,9 +66,12 @@ def fixed_in(vulns: List[Dict[str, Any]], ids: List[str], name: str, ecosystem: 
     return found
 
 
+SEVERITY_ORDER = ["low", "medium", "high", "critical"]
+
+
 def findings(report: Dict[str, Any], root: Path) -> List[Dict[str, Any]]:
-    """One finding per vulnerability group and package version, in a stable order."""
-    out = []
+    """One finding per package version, with every advisory against it: one upgrade usually fixes them all."""
+    grouped: Dict[str, Dict[str, Any]] = {}
     for result in report.get("results", []):
         path = result.get("source", {}).get("path", "")
         try:
@@ -77,21 +80,36 @@ def findings(report: Dict[str, Any], root: Path) -> List[Dict[str, Any]]:
             pass
         for item in result.get("packages", []):
             package = item.get("package", {})
+            name, version, ecosystem = package.get("name", "?"), package.get("version", "?"), package.get("ecosystem", "?")
+            vulns = item.get("vulnerabilities", [])
             for group in item.get("groups", []):
                 ids = sorted(group.get("ids", []))
                 if not ids:
                     continue
-                name, version, ecosystem = package.get("name", "?"), package.get("version", "?"), package.get("ecosystem", "?")
-                vulns = item.get("vulnerabilities", [])
-                summary = next((v.get("summary") for v in vulns if v.get("id") in ids and v.get("summary")), "")
-                out.append({
-                    "key": f"{ecosystem}/{name}@{version}/{ids[0]}",
-                    "id": ids[0], "aliases": sorted(set(group.get("aliases", [])) - {ids[0]}),
-                    "package": name, "version": version, "ecosystem": ecosystem, "lockfile": path,
-                    "severity": severity(group.get("max_severity", "")), "score": group.get("max_severity", ""),
-                    "summary": summary, "fixed": fixed_in(vulns, ids, name, ecosystem),
+                key = f"{ecosystem}/{name}@{version}"
+                finding = grouped.setdefault(key, {
+                    "key": key, "package": name, "version": version, "ecosystem": ecosystem, "lockfiles": [],
+                    "advisories": [], "severity": "low", "fixed": [],
                 })
-    return sorted({f["key"]: f for f in out}.values(), key=lambda f: f["key"])
+                if path not in finding["lockfiles"]:
+                    finding["lockfiles"].append(path)
+                if any(a["id"] == ids[0] for a in finding["advisories"]):
+                    continue
+                level = severity(group.get("max_severity", ""))
+                fixed = fixed_in(vulns, ids, name, ecosystem)
+                finding["advisories"].append({
+                    "id": ids[0], "aliases": sorted(set(group.get("aliases", [])) - {ids[0]}), "severity": level,
+                    "score": group.get("max_severity", ""), "fixed": fixed,
+                    "summary": next((v.get("summary") for v in vulns if v.get("id") in ids and v.get("summary")), ""),
+                })
+                if SEVERITY_ORDER.index(level) > SEVERITY_ORDER.index(finding["severity"]):
+                    finding["severity"] = level
+    for finding in grouped.values():
+        finding["advisories"].sort(key=lambda a: (-SEVERITY_ORDER.index(a["severity"]), a["id"]))
+        # Due by the worst advisory; "fixed" is known only when every advisory has a fix.
+        finding["fixed"] = sorted({v for a in finding["advisories"] for v in a["fixed"]}) \
+            if all(a["fixed"] for a in finding["advisories"]) else []
+    return [grouped[key] for key in sorted(grouped)]
 
 
 def due(finding: Dict[str, Any], public: bool, today: datetime.date) -> str:
@@ -104,19 +122,21 @@ def due(finding: Dict[str, Any], public: bool, today: datetime.date) -> str:
 
 
 def issue_title(finding: Dict[str, Any]) -> str:
-    return f"Security: {finding['package']} {finding['version']} ({finding['id']}, {finding['severity']})"
+    count = len(finding["advisories"])
+    first = finding["advisories"][0]["id"] + (f" and {count - 1} more" if count > 1 else "")
+    return f"Security: {finding['package']} {finding['version']} ({first}, {finding['severity']})"
 
 
 def issue_body(finding: Dict[str, Any], public: bool, today: datetime.date) -> str:
-    fixed = ", ".join(finding["fixed"]) or "none yet"
-    also = f" (also {', '.join(finding['aliases'])})" if finding["aliases"] else ""
-    return (f"{finding['summary'] or 'A known vulnerability.'}\n\n"
-            f"| | |\n| --- | --- |\n"
-            f"| Package | `{finding['package']}` {finding['version']} ({finding['ecosystem']}), in `{finding['lockfile']}` |\n"
-            f"| Advisory | [{finding['id']}](https://osv.dev/vulnerability/{finding['id']}){also} |\n"
-            f"| Severity | {finding['severity']} (CVSS {finding['score'] or 'not given'}) |\n"
-            f"| Fixed in | {fixed} |\n"
-            f"| Due | {due(finding, public, today)} |\n\n"
+    rows = "".join(
+        f"| [{a['id']}](https://osv.dev/vulnerability/{a['id']}) | {a['severity']} (CVSS {a['score'] or 'not given'}) "
+        f"| {', '.join(a['fixed']) or 'none yet'} | {(a['summary'] or '').replace('|', '/')} |\n"
+        for a in finding["advisories"])
+    lockfiles = ", ".join(f"`{path}`" for path in finding["lockfiles"])
+    return (f"`{finding['package']}` {finding['version']} ({finding['ecosystem']}), in {lockfiles}, has "
+            f"{len(finding['advisories'])} known {'vulnerability' if len(finding['advisories']) == 1 else 'vulnerabilities'}"
+            f". **Due: {due(finding, public, today)}**, by the most severe.\n\n"
+            "| Advisory | Severity | Fixed in | Summary |\n| --- | --- | --- | --- |\n" + rows + "\n"
             "Update within the version range the manifest allows where that is enough; a security fix goes through "
             "the same checks as any change (UPD-5) and waits the usual 24 hours unless the owner says otherwise "
             "(UPD-4). Found by the weekly scan (`scripts/vuln-scan.py`); it closes this issue itself once the "
@@ -155,6 +175,13 @@ def sync_issues(api: Api, repo: str, items: List[Dict[str, Any]], public: bool, 
     """Open, reopen and close this script's issues to match the findings. Returns what it did."""
     done: List[str] = []
     try:
+        api("GET", f"/repos/{repo}/issues?per_page=1", None)
+    except urllib.error.HTTPError as error:
+        if error.code == 410:
+            raise SystemExit("vuln-scan: issues are switched off in this repository, so the findings above cannot "
+                             "become issues (UPD-2). Switch them on, or record the owner's waiver.")
+        raise
+    try:
         api("POST", f"/repos/{repo}/labels", {"name": LABEL, "color": "b60205", "description": "A known vulnerability (UPD-2)"})
     except urllib.error.HTTPError as error:
         if error.code != 422:  # 422: the label is already there
@@ -177,10 +204,14 @@ def sync_issues(api: Api, repo: str, items: List[Dict[str, Any]], public: bool, 
             api("POST", f"/repos/{repo}/issues/{issue['number']}/comments",
                 {"body": f"Found again by the scan of {today.isoformat()}."})
             done.append(f"reopened #{issue['number']}: {issue_title(finding)}")
+    numbers = {key: issue["number"] for key, issue in scanner_issues(api, repo).items() if key in current}
     for key, issue in existing.items():
         if issue["state"] == "open" and key not in current:
-            api("POST", f"/repos/{repo}/issues/{issue['number']}/comments",
-                {"body": f"No longer found by the scan of {today.isoformat()}: the lockfiles no longer have it."})
+            group = key.rsplit("/", 1)[0]  # an issue of one advisory, from before issues were per package version
+            note = (f"Now tracked in #{numbers[group]}, with every advisory against this package version."
+                    if group in numbers else
+                    f"No longer found by the scan of {today.isoformat()}: the lockfiles no longer have it.")
+            api("POST", f"/repos/{repo}/issues/{issue['number']}/comments", {"body": note})
             api("PATCH", f"/repos/{repo}/issues/{issue['number']}", {"state": "closed", "state_reason": "completed"})
             done.append(f"closed #{issue['number']}: {issue['title']}")
     return done
@@ -213,9 +244,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     public = sc.Repo(root).exposure == "public"
     today = datetime.date.today()
     for finding in items:
-        print(f"{finding['severity']:8} {finding['package']} {finding['version']} {finding['id']} "
-              f"(fixed in {', '.join(finding['fixed']) or 'nothing yet'}) in {finding['lockfile']}")
-    print(f"{len(items)} known vulnerabilities in the lockfiles.")
+        print(f"{finding['severity']:8} {finding['package']} {finding['version']}: "
+              f"{', '.join(a['id'] for a in finding['advisories'])} (fixed in {', '.join(finding['fixed']) or 'not all yet'})")
+    total = sum(len(f["advisories"]) for f in items)
+    print(f"{total} known vulnerabilities in {len(items)} package versions in the lockfiles.")
     if args.issues:
         repo = os.environ.get("GITHUB_REPOSITORY")
         if not repo or not os.environ.get("GITHUB_TOKEN"):

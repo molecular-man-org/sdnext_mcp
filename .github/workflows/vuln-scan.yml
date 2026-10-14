@@ -1,3 +1,4 @@
+---
 name: Vulnerability scan
 
 # Rule UPD-2: the lockfiles are scanned for known vulnerabilities every week,
@@ -5,7 +6,7 @@ name: Vulnerability scan
 # Run it by hand too before a release. The scan is offline: osv-scanner
 # downloads the public database and compares here, so the package list never
 # leaves the runner. Findings never turn this red; a scan that cannot run does.
-on:
+on: # yamllint disable-line rule:truthy
   schedule:
     - cron: "17 11 * * 1" # Mondays, 7:17 AM Eastern (summer time)
   workflow_dispatch:
