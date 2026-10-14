@@ -135,6 +135,111 @@
       "by": "overnight agent (Sonnet), 2026-10-14",
       "date": "2026-10-14",
       "evidence": "no required checks on the default branch: branch protection API returns 404 Branch not protected and the repository has no rulesets"
+    },
+    {
+      "rule": "DEP-4",
+      "result": "pass",
+      "by": "agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "git log -- package.json package-lock.json lists only 43d89a3, c851880 and a88ed66, all before the kit adoption (9aa2f35); no dependency change since, and CLAUDE.md:43 states the rule"
+    },
+    {
+      "rule": "UPD-4",
+      "result": "pass",
+      "by": "agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "Rule only applies when a fix skips the 24-hour wait; no commit since adoption touches package.json or package-lock.json (git log), so no skip happened and none needs an owner record"
+    },
+    {
+      "rule": "UPD-6",
+      "result": "pass",
+      "by": "agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "Rule only applies to a switched-off scan; none is switched off: .github/workflows/vuln-scan.yml is active on a weekly schedule (lines 9-12) and grep for 'if: false' or disabled in .github/workflows finds nothing"
+    },
+    {
+      "rule": "NET-1",
+      "result": "pass",
+      "by": "agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "The only outbound destination is the operator-configured SD.Next URL (src/client.js:60,109; src/tools/files.js:62), default loopback (README.md:55); sdnext_call_api paths are forced under that base (src/tools/meta.js:23). A home app's default is none, so no outbound entry is needed"
+    },
+    {
+      "rule": "NET-2",
+      "result": "pass",
+      "by": "agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "grep for fetch( and http(s):// in src/ finds only the configured SD.Next base URL (src/client.js:60,109; src/tools/files.js:62); no log, error-report, usage or tracking sender exists"
+    },
+    {
+      "rule": "NET-3",
+      "result": "pass",
+      "by": "agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "grep -i telemetry/analytics/sentry in src/ and package.json finds nothing; the only runtime dependencies are @modelcontextprotocol/sdk and zod (package.json), which do not phone home"
+    },
+    {
+      "rule": "TMP-1",
+      "result": "pass",
+      "by": "agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "README.md:63 documents SDNEXT_SAVE_DIR as the one place the server writes images (src/image.js:26-33); default is empty (src/config.js:23) so nothing is written into the checkout; no cache or log files are written"
+    },
+    {
+      "rule": "TMP-3",
+      "result": "pass",
+      "by": "agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "The server keeps no cache (grep src/ finds only API parameter names such as src/tools/_common.js:128); the only cache is CI's setup-node npm cache (ci.yml:28,44), managed by the runner action with its own eviction"
+    },
+    {
+      "rule": "TMP-6",
+      "result": "pass",
+      "by": "agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "git ls-files lists no scratch, tmp or log files; .gitignore excludes .tools/ and __pycache__/; CLAUDE.md:57 states the rule"
+    },
+    {
+      "rule": "WORK-1",
+      "result": "fail",
+      "by": "agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "Issues are switched off in this repository (gh api repos/molecular-man-org/sdnext_mcp: has_issues false), so open work cannot be a GitHub issue; no to-do list file exists (grep TODO/FIXME finds none in tracked files)"
+    },
+    {
+      "rule": "WORK-3",
+      "result": "fail",
+      "by": "agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "No commit says Refs #N (git log); issues are switched off so none can be named. Only pull-request merge commits carry numbers"
+    },
+    {
+      "rule": "WORK-5",
+      "result": "fail",
+      "by": "agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "No pinned open issue labelled friction exists and none can: issues are switched off (has_issues false), although CLAUDE.md:62-64 asks for one"
+    },
+    {
+      "rule": "WORK-8",
+      "result": "fail",
+      "by": "agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "Branches and pull-request heads are kit-v1.3.0, kit-v1.2.9, overnight-standard-followups, adopt-kit-v1.2.6, ci/prefer-onprem-runners (gh pr list); none starts with an issue number, and issues are off"
+    },
+    {
+      "rule": "LOG-1",
+      "result": "fail",
+      "by": "agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "src/app.js:60 logs the whole error object, and SdNextError messages embed SD.Next response bodies (src/client.js:67,112), i.e. response content in a log line"
+    },
+    {
+      "rule": "LOG-5",
+      "result": "fail",
+      "by": "agent (Sonnet), 2026-10-14",
+      "date": "2026-10-14",
+      "evidence": "Logs are console.error to stderr only (src/app.js:45,60,65); no document states how long they are kept, where, or who can read them (README.md and docs/ searched)"
     }
   ],
   "predates_standard": true
