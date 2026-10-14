@@ -62,6 +62,16 @@ SDNEXT_MCP_TRANSPORT=http SDNEXT_MCP_PORT=8787 node src/index.js
 | `SDNEXT_MCP_DRY_RUN`                  | `false`                 | `1` = print requests, don't send       |
 | `SDNEXT_SAVE_DIR`                     | —                       | Default dir for `save_dir` disk writes |
 
+## Logs
+
+The server writes no log files. It prints a few lines to standard error (stderr) and nothing else:
+
+- **What:** a start-up line (transport, SD.Next address, dry-run flag) and, when a request on the HTTP transport fails, one error line. That error line can include the text of an error that SD.Next returned. Passwords and API keys are never printed.
+- **Where:** the process's stderr only. The server keeps nothing itself, so it has no retention time and nothing of its own to delete: a line lives as long as whatever started the server keeps it (for example your MCP host's log, a terminal, or a service manager's journal). Set that program's log retention if you need a fixed time.
+- **Who can read it:** whoever can read the stderr of the process, normally the person who started it and the administrators of that machine.
+- **SD.Next's own log:** the `sdnext_log` tool reads the log of the SD.Next server you point this at; how long that log is kept is set by SD.Next, not here.
+- **CI logs:** the GitHub Actions logs of this repository are kept by GitHub for its default 90 days and can be read by people with access to the repository.
+
 ## Tool families (128 total)
 
 - **Generation** — `sdnext_txt2img`, `sdnext_img2img`, `sdnext_control`, `sdnext_process_image`, `sdnext_process_batch`, `sdnext_detail`, `sdnext_video`, `sdnext_prompt_enhance`
