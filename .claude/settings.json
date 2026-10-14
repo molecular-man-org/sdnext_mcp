@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(ls:*)",
+      "Bash(actionlint:*)",
+      "Bash(yamllint:*)",
+      "Bash(shellcheck:*)",
+      "Bash(npx markdownlint-cli2:*)",
+      "Bash(scripts/check.sh:*)",
+      "Bash(scripts/standard-checks.sh:*)",
+      "Bash(python3 scripts/standard_check.py:*)",
+      "Bash(gitleaks:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/protect-files.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/friction-reminder.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

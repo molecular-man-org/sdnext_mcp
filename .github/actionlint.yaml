@@ -1,0 +1,6 @@
+# Labels of the owner's self-hosted runners, so actionlint accepts them.
+self-hosted-runner:
+  labels:
+    - org-pool
+    - wide-pool
+    - linux-arm64

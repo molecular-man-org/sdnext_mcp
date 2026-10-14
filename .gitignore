@@ -1,2 +1,6 @@
 node_modules/
 coverage/
+
+# Personal agent files, never shared (REPO-2)
+.claude/settings.local.json
+CLAUDE.local.md
