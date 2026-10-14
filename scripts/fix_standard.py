@@ -13,6 +13,8 @@ What it fixes, each only when the checker finds it missing, and always by adding
 - REPO-3: `.gitattributes` sets LF line endings (`* text=auto eol=lf`).
 - The kit's own Python scripts are left out of the project's ruff and coverage settings in `pyproject.toml`, where
   those sections exist (the kit tests them; a project's gates otherwise fail on them).
+- DEP-5: `.github/dependabot.yml` gains an entry for each package folder it does not cover, with a one-day cooldown
+  (DEP-3) and minor and patch updates grouped.
 - CI-3, CI-4, CI-5, CI-6, CI-7, CI-8: the workflows, through `fix_workflows.py`.
 
 Then run the check command and read the diff. Owned by the template: change it there, not in a project.
@@ -102,7 +104,37 @@ def kit_exclusions(repo: sc.Repo, root: Path) -> Optional[Fix]:
     return "pyproject.toml", new, "kit scripts left out of the project's ruff and coverage settings"
 
 
-FIXERS: List[Callable[[sc.Repo, Path], Optional[Fix]]] = [claude_md, gitignore, line_endings, kit_exclusions]
+def dependabot(repo: sc.Repo, root: Path) -> Optional[Fix]:
+    """DEP-5: an update entry for each package folder Dependabot does not cover, waiting a day (DEP-3)."""
+    if sc.dep_5(repo).status == "pass":
+        return None
+    path = repo.first(".github/dependabot.yml", ".github/dependabot.yaml") or ".github/dependabot.yml"
+    text = repo.read(path) if repo.has(path) else "version: 2\nupdates:\n"
+    listed = set(re.findall(r"package-ecosystem\s*:\s*[\"']?([a-z-]+)", text))
+    added = []
+    for folder, kind in sorted(sc._manifest_dirs(repo).items()):
+        prefix = f"{folder}/" if folder else ""
+        if kind == "js":
+            ecosystem = "bun" if repo.has(prefix + "bun.lock") or repo.has(prefix + "bun.lockb") else "npm"
+            if {"npm", "bun"} & listed and not folder:
+                continue
+        else:
+            ecosystem = "uv" if repo.has(prefix + "uv.lock") else "pip"
+            if {"pip", "uv"} & listed and not folder:
+                continue
+        if re.search(rf"directory\s*:\s*[\"']?/{re.escape(folder)}[\"']?\s*$", text, re.M) and ecosystem in listed:
+            continue
+        text = text.rstrip("\n") + (
+            f"\n  - package-ecosystem: {ecosystem}\n    directory: /{folder}\n    schedule:\n      interval: weekly\n"
+            "    cooldown:\n      default-days: 1  # DEP-3: nothing younger than a day\n"
+            f"    groups:\n      {ecosystem}-minor-and-patch:\n        update-types: [minor, patch]\n")
+        added.append(f"{ecosystem} in /{folder}")
+    if not added:
+        return None
+    return path, text, "DEP-5: Dependabot covers " + ", ".join(added)
+
+
+FIXERS: List[Callable[[sc.Repo, Path], Optional[Fix]]] = [claude_md, gitignore, line_endings, kit_exclusions, dependabot]
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -119,6 +151,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             name, text, note = fix
             print(f"{name}: {note}")
             if args.write:
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
                 (root / name).write_text(text, encoding="utf-8")
     return fix_workflows.main(["--repo", str(root)] + (["--write"] if args.write else [])
                               + (["--keep-runners"] if args.keep_runners else []))
