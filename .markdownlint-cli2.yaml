@@ -1,0 +1,13 @@
+config:
+  default: true
+  MD013: false # line length: prose wraps in the editor
+  MD033: false # inline HTML is allowed
+  MD041: false # PR and issue templates do not start with a top-level heading
+
+globs:
+  - "**/*.md"
+
+ignores:
+  - ".lovable/**" # the UI builder's own notes
+
+gitignore: true

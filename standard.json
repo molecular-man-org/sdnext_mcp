@@ -1,0 +1,14 @@
+{
+  "standard_version": "1.0",
+  "category": "tools",
+  "layers": ["base"],
+  "back_end": "none",
+  "deployed": false,
+  "exposure": "none",
+  "accounts": false,
+  "check_command": "scripts/check.sh",
+  "ci_runners": ["ubuntu-latest"],
+  "exceptions": [],
+  "attested": [],
+  "predates_standard": true
+}

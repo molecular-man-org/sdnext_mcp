@@ -1,0 +1,13 @@
+{
+  "standard_version": "1.0",
+  "counts": {
+    "CI-5": 0,
+    "CI-6": 0,
+    "CI-10": 0,
+    "WORK-2": 0,
+    "LOG-3": 0,
+    "NET-4": 0,
+    "TMP-2": 2
+  },
+  "held": ["CI-2"]
+}
