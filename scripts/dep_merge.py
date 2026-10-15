@@ -10,7 +10,9 @@ pull request from Dependabot into the default branch when all of these hold:
 
 - it is at least 24 hours old, so the version it brings is too (DEP-3: nothing younger than a day is installed);
 - every check on its head finished and passed, and there is at least one;
-- GitHub says it can merge without a conflict.
+- GitHub says it can merge without a conflict;
+- with `"majors": false` in that entry, it is not a major version: one whose title does not read "from A to B" with
+  the same major number (for 0.x, the same minor) waits for a person, a grouped update included.
 
 It merges with a merge commit (REPO-9), pinned to the head it checked. Anything else waits for the next run, and a
 pull request whose checks failed stays open for a person. Standard library only; Python 3.9. Owned by the template:
@@ -23,6 +25,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 import urllib.request
 from pathlib import Path
@@ -55,6 +58,15 @@ def allowed(record: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def is_major(title: str) -> bool:
+    """True unless the title shows a version change within one major (0.x: one minor). Unknown counts as major."""
+    found = re.search(r"\bfrom v?(\d+)\.(\d+)\S* to v?(\d+)\.(\d+)", title)
+    if not found:
+        return True
+    old_major, old_minor, new_major, new_minor = (int(part) for part in found.groups())
+    return old_major != new_major or (old_major == 0 and old_minor != new_minor)
+
+
 def checks_passed(api: Api, repo: str, sha: str) -> str:
     """'' when every check on `sha` finished and passed; otherwise why not."""
     runs = (api("GET", f"/repos/{repo}/commits/{sha}/check-runs?per_page=100", None) or {}).get("check_runs", [])
@@ -72,13 +84,16 @@ def checks_passed(api: Api, repo: str, sha: str) -> str:
     return ""
 
 
-def run(api: Api, repo: str, now: datetime.datetime, dry_run: bool = False) -> List[str]:
+def run(api: Api, repo: str, now: datetime.datetime, dry_run: bool = False, majors: bool = True) -> List[str]:
     default = api("GET", f"/repos/{repo}", None)["default_branch"]
     said = []
     for pr in api("GET", f"/repos/{repo}/pulls?state=open&per_page=100", None) or []:
         if (pr.get("user") or {}).get("login") != BOT or pr["base"]["ref"] != default or pr.get("draft"):
             continue
         name = f"#{pr['number']} {pr['title']}"
+        if not majors and is_major(pr["title"]):
+            said.append(f"waits: {name} (a major version: for a person)")
+            continue
         created = datetime.datetime.strptime(pr["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
         if now - created < MIN_AGE:
             said.append(f"waits: {name} (younger than 24 hours)")
@@ -115,7 +130,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not repo or not os.environ.get("GITHUB_TOKEN"):
         sys.exit("dep_merge: needs GITHUB_REPOSITORY and GITHUB_TOKEN")
     print(f"Dependency pull requests merge by themselves here (allowed by {who}).")
-    for line in run(github_api, repo, datetime.datetime.now(datetime.timezone.utc), args.dry_run) or ["none open"]:
+    majors = record["dependency_automerge"].get("majors", True) is not False
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for line in run(github_api, repo, now, args.dry_run, majors) or ["none open"]:
         print(line)
     return 0
 
