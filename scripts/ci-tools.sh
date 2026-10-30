@@ -66,7 +66,14 @@ install_tool() {
   fi
   want=$(expected "${tool}_${os}_${arch}")
   work=$(mktemp -d)
-  curl -fsSL -o "$work/download" "$url"
+  # A 5xx or a dropped connection from the release host is retried for up to two minutes, so one bad second costs
+  # seconds and not a red run (reported 2026-10-28). The download is verified against its checksum afterwards.
+  # --retry-all-errors needs curl 7.71 or newer; an older curl still retries the errors it knows as transient.
+  retry_all=""
+  if curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then retry_all="--retry-all-errors"; fi
+  # shellcheck disable=SC2086  # retry_all is one flag or nothing
+  curl -fsSL --retry 5 $retry_all --retry-delay 5 --retry-max-time 120 --connect-timeout 20 --max-time 180 \
+    -o "$work/download" "$url"
   if [ "$(sha256 "$work/download")" != "$want" ]; then
     echo "checksum mismatch for $url" >&2
     rm -rf "$work"

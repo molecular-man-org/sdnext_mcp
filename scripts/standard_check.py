@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-STANDARD_VERSION = "3.0"
+STANDARD_VERSION = "3.1"
 RECORD_NAME = "standard.json"
 BASELINE_NAME = "standard-baseline.json"
 MAX_READ_BYTES = 400_000
@@ -846,6 +846,15 @@ def repo_2(repo: Repo) -> Result:
     if "settings.local.json" not in repo.read(".gitignore"):
         return bad(".gitignore does not ignore .claude/settings.local.json")
     return ok()
+
+
+def repo_10(repo: Repo) -> Result:
+    """REPO-10: agent worktrees are git-ignored, so a scratch checkout never reaches a commit, a linter or a formatter."""
+    if not repo.has(".gitignore"):
+        return bad("no .gitignore")
+    if re.search(r"(?m)^/?(\.claude/)?worktrees/?\s*$", repo.read(".gitignore")):
+        return ok()
+    return bad(".gitignore does not ignore .claude/worktrees/ (or worktrees/)")
 
 
 def repo_3(repo: Repo) -> Result:
@@ -1674,6 +1683,75 @@ def mobile_10(repo: Repo) -> Result:
     return _count_in(repo, repo.screen_files((".tsx", ".jsx")), EAGER_IMAGE)
 
 
+JOURNEY = re.compile(r"(?m)^\s*test(?:\.only)?\(\s*[\"'`]([^\"'`]*)[\"'`]")
+FULL_SUITE = re.compile(r"test\.describe(?:\.\w+)?\(\s*[\"'`][^\"'`]*@full")
+SMOKE_JOURNEYS = 5
+
+
+def test_9(repo: Repo) -> Result:
+    """TEST-9: on a pull request the browser tests are the kit's gates and at most five journeys of the project's own.
+
+    A journey is a `test(` in the project's own `e2e/**/*.spec.ts` (not the kit's) whose title is not tagged `@full`;
+    a file whose `describe` is tagged `@full` is nightly as a whole. CI runs the pull request stage with
+    `--grep-invert @full`, so this is the count it runs."""
+    journeys: Dict[str, int] = {}
+    for name in repo.files:
+        if not re.match(r"(e2e|tests/e2e)/.*\.spec\.ts$", name) or "/kit/" in name or "node_modules/" in name:
+            continue
+        text = repo.read(name)
+        if FULL_SUITE.search(text):
+            continue
+        count = sum(1 for title in JOURNEY.findall(text) if "@full" not in title)
+        if count:
+            journeys[name] = count
+    total = sum(journeys.values())
+    if total <= SMOKE_JOURNEYS:
+        return ok(f"{total} journeys on a pull request" if total else "no journeys of the project's own")
+    where = ", ".join(f"{n} {c}" for n, c in sorted(journeys.items(), key=lambda item: -item[1])[:5])
+    return bad(f"{total} journeys on a pull request, {SMOKE_JOURNEYS} at most: tag the rest @full ({where})")
+
+
+def reading_grade(text: str) -> Tuple[float, int]:
+    """(Flesch-Kincaid grade, words) of Markdown prose: code, headings, tables and link targets left out."""
+    text = re.sub(r"```.*?```", " ", text, flags=re.S)
+    lines = [l for l in text.splitlines() if not l.lstrip().startswith(("#", "|", "<", "!["))]
+    prose = " ".join(lines)
+    prose = re.sub(r"`[^`]*`", " ", prose)
+    prose = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", prose)
+    words = re.findall(r"[A-Za-z][A-Za-z'-]*", prose)
+    sentences = max(1, len([s for s in re.split(r"[.!?]+", prose) if s.strip()]))
+    if not words:
+        return 0.0, 0
+
+    def syllables(word: str) -> int:
+        groups = len(re.findall(r"[aeiouy]+", word.lower()))
+        if word.lower().endswith("e") and groups > 1 and not word.lower().endswith(("le", "ee")):
+            groups -= 1
+        return max(1, groups)
+
+    grade = 0.39 * len(words) / sentences + 11.8 * sum(syllables(w) for w in words) / len(words) - 15.59
+    return round(grade, 1), len(words)
+
+
+READING_GRADE = 11
+MIN_WORDS_TO_MEASURE = 30
+
+
+def a11y_7(repo: Repo) -> Result:
+    """A11Y-7: help written for the people who use the app reads at the owner's grade (11) or lower."""
+    found = []
+    for name in repo.files:
+        parts = name.split("/")
+        if "help" not in parts[:-1] or not name.endswith(".md") or "node_modules/" in name:
+            continue
+        grade, words = reading_grade(repo.read(name))
+        if words >= MIN_WORDS_TO_MEASURE and grade > READING_GRADE:
+            found.append(f"{name} grade {grade}")
+    if found:
+        return bad(f"above grade {READING_GRADE}: " + ", ".join(found[:5]))
+    return ok("no help files to measure" if not any("help" in n.split("/")[:-1] and n.endswith(".md") for n in repo.files) else f"grade {READING_GRADE} or lower")
+
+
 def a11y_2(repo: Repo) -> Result:
     baseline = repo.path_setting("a11y_baseline")
     if baseline and not repo.has(baseline):
@@ -1819,6 +1897,7 @@ RULES: List[Rule] = [
     Rule("REPO-3", "all", "should", "auto", "LF line endings", repo_3),
     Rule("REPO-5", "all", "should", "auto", "Pull request template", repo_5),
     Rule("REPO-8", "all", "must", "auto", "LICENSE file", repo_8, older="should"),
+    Rule("REPO-10", "all", "should", "auto", "Agent worktrees are git-ignored", repo_10),
     Rule("AGENT-1", "all", "must", "auto", "CLAUDE.md names the check command", agent_1),
     Rule("AGENT-2", "all", "must", "auto", ".claude/settings.json denies reading secrets", agent_2),
     Rule("CI-1", "all", "must", "auto", "One command runs every check", ci_1),
@@ -1839,6 +1918,7 @@ RULES: List[Rule] = [
     Rule("TEST-4", "all", "must", "auto", "Lint and format checks run in CI", test_4, older="should"),
     Rule("TEST-7", "web", "must", "auto", "No coverage tool wraps the browser tests", test_7, older="should"),
     Rule("TEST-8", "all", "must", "auto", "Coverage exclusions are a closed list, each with a reason", test_8, older="should"),
+    Rule("TEST-9", "web", "should", "auto", "At most five browser journeys run on a pull request", test_9),
     Rule("SEC-1", "all", "must", "auto", "Secret scan in CI", sec_1),
     Rule("WORK-4", "all", "must", "auto", "No roadmap, to-do or backlog kept in a file", work_4),
     Rule("LOG-3", "all", "must", "ratchet", "Outside logging services are named and approved per project", log_3),
@@ -1863,6 +1943,7 @@ RULES: List[Rule] = [
     Rule("MOBILE-3", "web", "must", "ratchet", "Heights use dvh, never vh or h-screen", mobile_3),
     Rule("A11Y-2", "web", "must", "auto", "Accessibility is measured against a baseline", a11y_2),
     Rule("A11Y-3", "web", "must", "auto", "A control list names the test for every control", a11y_3),
+    Rule("A11Y-7", "web", "should", "auto", "Help for users reads at grade 11 or lower", a11y_7),
     Rule("I18N-1", "web", "must", "auto", "The page declares its language", i18n_1),
     Rule("VER-1", "app", "must", "auto", "The version is YYYY.M.N, in one file", ver_1, older="should"),
     Rule("MOBILE-5", "web", "must", "auto", "The page fills the screen around the notch", mobile_5, older="should", blocks=False),
@@ -1924,6 +2005,9 @@ RULE_SINCE: Dict[str, str] = {
     ),
     "1.1": (
         "TEST-7 TEST-8"
+    ),
+    "3.1": (
+        "REPO-10 TEST-9 A11Y-7"
     ),
 }
 
