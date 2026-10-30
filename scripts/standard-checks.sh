@@ -12,6 +12,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(git -C "$here" rev-parse --show-toplevel) || exit 1
 cd "$root" || exit 1
 
+# The pinned tools scripts/ci-tools.sh installs: CI puts their folder on the PATH; a local clone has them here.
+PATH="$root/.tools/bin:$PATH"
+
 failed=0
 range=${CHECK_RANGE:-}
 guard_range=$range
