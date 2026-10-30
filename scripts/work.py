@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Start and finish a piece of work the way the standard counts it: one issue, its branch, its commits, its friction.
+"""Start a piece of work the way the standard counts it: one issue, its branch, its commits, its quick checks.
 
     python3 scripts/work.py start 140 [short-name]   a branch `140-short-name` from the default branch (WORK-8),
-                                                     and a commit-msg hook that adds `Refs #140` (WORK-3)
-    python3 scripts/work.py friction "ci-wait x3 ~20 min; none else"
-                                                     one comment on the pinned `friction` issue (WORK-5); the issue,
-                                                     its label and the pin are made the first time
-    python3 scripts/work.py friction                 only say where the friction issue is
+                                                     a commit-msg hook that adds `Refs #140` (WORK-3), and a pre-push
+                                                     hook that runs the quick checks (`scripts/check.sh --quick`)
+    python3 scripts/work.py read 13                  one issue as plain text: head, body and every comment, with
+                                                     times in US Eastern
 
 --repo OWNER/NAME works on another repository's issues (default: this one). It needs the gh CLI, signed in. The name
-comes from the issue's title when none is given. The hook goes into this clone only (git's hooks folder is not
-versioned); `start` puts it there, and leaves alone a commit-msg hook it did not write. A friction comment holds counts
-and short descriptions only, never conversation text or anyone's content: it is refused above 600 characters.
+comes from the issue's title when none is given. The hooks go into this clone only (git's hooks folder is not
+versioned); `start` puts them there, and leaves alone a hook it did not write. The pre-push hook refuses a push whose
+quick checks fail (`git push --no-verify` still pushes; say so when you use it): a failure found here costs seconds,
+one found in CI costs a round trip. A check command that does not know `--quick` runs everything.
 
 Owned by the template: change it there, not in a project.
 """
@@ -23,23 +23,25 @@ import json
 import re
 import subprocess
 import sys
+import datetime
 from pathlib import Path
 from typing import Callable, List, Optional
 
-LABEL = "friction"
-MAX_FRICTION = 600
 HOOK_MARK = "# written by scripts/work.py"
 HOOK = f"""#!/bin/sh
 {HOOK_MARK}: adds `Refs #N` on a branch named N-something (WORK-3)
-exec python3 "$(git rev-parse --show-toplevel)/scripts/work.py" commit-msg "$1"
+exec python3 "$(git rev-parse --show-toplevel)/{{path}}" commit-msg "$1"
+"""
+PUSH_HOOK = f"""#!/bin/sh
+{HOOK_MARK}: the quick checks before every push, so a failure costs seconds here and not a CI round trip
+cd "$(git rev-parse --show-toplevel)" || exit 1
+check=$(python3 -c 'import json; print(json.load(open("standard.json")).get("check_command") or "scripts/check.sh")' 2>/dev/null || echo scripts/check.sh)
+if ! sh -c "$check --quick"; then
+  echo "pre-push: the quick checks failed; nothing was pushed (git push --no-verify pushes anyway: say so)" >&2
+  exit 1
+fi
 """
 TRAILER = re.compile(r"^[A-Za-z][A-Za-z0-9-]*: ")
-FRICTION_BODY = (
-    "The friction log (WORK-5). At the end of each piece of work (a pull request merged, an issue closed, a long "
-    "session ending) add one comment: each friction item with a tag, a count and the rough cost in turns or minutes, "
-    "or \"none\". Counts and short descriptions only, never conversation text or anyone's content. A tag seen in three "
-    "pieces of work becomes a tool proposal issue (WORK-6).\n\n`python3 scripts/work.py friction \"TEXT\"` adds one."
-)
 
 
 def sh(args: List[str], check: bool = True) -> str:
@@ -93,14 +95,28 @@ def with_refs(message: str, branch: str) -> str:
     return "\n".join(out) + "\n"
 
 
-def install_hook(say: Callable[[str], None] = print) -> bool:
+def hook_text() -> str:
+    """The commit hook runs this very file: scripts/work.py in a project, template/scripts/work.py in the kit's own repository (#41)."""
+    try:
+        top = Path(sh(["git", "rev-parse", "--show-toplevel"]).strip()).resolve()
+        path = Path(__file__).resolve().relative_to(top).as_posix()
+    except (ValueError, OSError, subprocess.CalledProcessError):
+        path = "scripts/work.py"
+    return HOOK.format(path=path)
+
+
+def install_hook(say: Callable[[str], None] = print, name: str = "commit-msg", content: Optional[str] = None) -> bool:
+    """Write one of the kit's hooks into this clone; a hook another tool wrote is left alone."""
+    if content is None:
+        content = hook_text()
     hooks = Path(sh(["git", "rev-parse", "--git-path", "hooks"]).strip())
-    hook = hooks / "commit-msg"
+    hook = hooks / name
     if hook.exists() and HOOK_MARK not in hook.read_text(encoding="utf-8", errors="replace"):
-        say(f"left alone: {hook} is not this kit's; add `Refs #N` to each commit by hand (WORK-3)")
+        what = "add `Refs #N` to each commit by hand (WORK-3)" if name == "commit-msg" else "run scripts/check.sh --quick before each push yourself"
+        say(f"left alone: {hook} is not this kit's; {what}")
         return False
     hooks.mkdir(parents=True, exist_ok=True)
-    hook.write_text(HOOK, encoding="utf-8")
+    hook.write_text(content, encoding="utf-8")
     hook.chmod(0o755)
     return True
 
@@ -120,38 +136,30 @@ def start(number: str, name: Optional[str], repo: Optional[str], say: Callable[[
     say(f"on {branch}, from {default}")
     if install_hook(say):
         say(f"each commit here will name #{number} (Refs #{number})")
+    if install_hook(say, "pre-push", PUSH_HOOK):
+        say("each push runs the quick checks first (scripts/check.sh --quick); a failure refuses the push")
     return 0
 
 
-def friction_issue(repo: Optional[str], say: Callable[[str], None] = print) -> str:
-    """The number of the open friction issue, made, labelled and pinned the first time."""
-    found = json.loads(gh(["issue", "list", "--label", LABEL, "--state", "open", "--json", "number"], repo) or "[]")
-    if found:
-        return str(sorted(item["number"] for item in found)[0])
-    sh(["gh", "label", "create", LABEL, "--force", "--color", "C5DEF5",
-        "--description", "Friction log of agent work (WORK-5)", *(["--repo", repo] if repo else [])])
-    url = gh(["issue", "create", "--title", "Friction log", "--label", LABEL, "--body", FRICTION_BODY], repo).strip()
-    number = url.rstrip("/").rsplit("/", 1)[-1]
-    gh(["issue", "pin", number], repo)
-    say(f"made and pinned the friction issue #{number}")
-    return number
+def eastern(stamp: str) -> str:
+    """An ISO time from GitHub as `YYYY-MM-DD HH:MM AM/PM ET`; the owner's standing order is Eastern time."""
+    from zoneinfo import ZoneInfo
+
+    when = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(ZoneInfo("America/New_York"))
+    return when.strftime("%Y-%m-%d %I:%M %p ") + ("EDT" if when.dst() else "EST")
 
 
-def friction(text: Optional[str], repo: Optional[str], say: Callable[[str], None] = print) -> int:
-    if text is not None:
-        text = text.strip()
-        if not text:
-            say('say what repeated, or "none"')
-            return 2
-        if len(text) > MAX_FRICTION:
-            say(f"{len(text)} characters: a friction comment is counts and short descriptions, at most {MAX_FRICTION}")
-            return 2
-    number = friction_issue(repo, say)
-    if text is None:
-        say(f"the friction issue is #{number}")
-        return 0
-    gh(["issue", "comment", number, "--body", text], repo)
-    say(f"added to the friction issue #{number}")
+def read_issue(number: str, repo: Optional[str], say: Callable[[str], None] = print) -> int:
+    """One issue as plain text in one call: the head, the body and every comment."""
+    out = gh(["issue", "view", number, "--json", "number,title,state,author,createdAt,labels,body,comments"], repo)
+    issue = json.loads(out)
+    author = (issue.get("author") or {}).get("login", "unknown")
+    say(f"#{issue['number']} {issue['title']} [{issue['state']}] by {author}, {eastern(issue['createdAt'])}")
+    say("labels: " + (", ".join(label["name"] for label in issue.get("labels", [])) or "none"))
+    say("\n" + (issue.get("body") or "").rstrip())
+    for comment in issue.get("comments", []):
+        who = (comment.get("author") or {}).get("login", "unknown")
+        say(f"\n--- {who}, {eastern(comment['createdAt'])}\n{(comment.get('body') or '').rstrip()}")
     return 0
 
 
@@ -161,11 +169,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     starting = sub.add_parser("start", help="a branch named after the issue, and the Refs hook")
     starting.add_argument("number")
     starting.add_argument("name", nargs="?", help="a short name (default: from the issue's title)")
-    adding = sub.add_parser("friction", help="add to the friction log (no text: only say where it is)")
-    adding.add_argument("text", nargs="?")
+    reading = sub.add_parser("read", help="one issue and its comments as plain text")
+    reading.add_argument("number")
     hook = sub.add_parser("commit-msg", help=argparse.SUPPRESS)
     hook.add_argument("path")
-    for p in (starting, adding):
+    for p in (starting, reading):
         p.add_argument("--repo", help="OWNER/NAME (default: this repository)")
     args = parser.parse_args(argv)
     try:
@@ -179,6 +187,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
         if args.step == "start":
             return start(args.number, args.name, args.repo)
+        if args.step == "read":
+            return read_issue(args.number, args.repo)
         return friction(args.text, args.repo)
     except RuntimeError as error:
         print(error, file=sys.stderr)

@@ -1,5 +1,5 @@
 {
-  "standard_version": "1.0",
+  "standard_version": "3.0",
   "category": "tools",
   "layers": ["base"],
   "back_end": "none",

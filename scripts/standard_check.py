@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-STANDARD_VERSION = "1.0"
+STANDARD_VERSION = "3.0"
 RECORD_NAME = "standard.json"
 BASELINE_NAME = "standard-baseline.json"
 MAX_READ_BYTES = 400_000
@@ -61,10 +61,20 @@ DEFAULT_LANES: Dict[str, List[str]] = {
 }
 DEFAULT_BUILDER_AUTHORS = ["gpt-engineer-app[bot]", "lovable-dev[bot]", "Lovable"]
 
+# A tools repository (an MCP server, a prompt library, a personal tool) is asked only this: CI runs one check
+# command on the owner's runners, a secret scan, a lockfile that CI installs from, and Dependabot (the owner,
+# 2026-10-30, standard 3.0). Nothing else applies to it, and it needs no record.
+TOOLS_RULES = frozenset({"CI-1", "CI-2", "CI-7", "DEP-1", "DEP-2", "DEP-5", "SEC-1"})
+# The UI builder's notes for Claude: always its own, whatever the lanes say. Designers work in the builder's editor
+# without Claude, and the builder cannot open issues, so it leaves the work for Claude here (LANE-9).
+BUILDER_NOTES = "LOVABLE-NOTES.md"
+
 SOURCE_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs")
 # Files the template puts into a project. They are not the project's own code.
 TEMPLATE_OWNED = ("scripts/standard_check.py", "scripts/ci-verdict.py", "scripts/pr_flow.py", "scripts/fix_workflows.py", "scripts/fix_standard.py",
-                  "scripts/vuln-scan.py", "scripts/dep_merge.py", "scripts/work.py")
+                  "scripts/vuln-scan.py", "scripts/dep_merge.py", "scripts/work.py", "scripts/automerge.py",
+                  "scripts/branch_cleanup.py", "scripts/failure_issue.py",
+                  "scripts/builder_refresh.py")
 # The owner's categories (2026-10-13). One per app; it sets the defaults for `exposure` and `accounts`, and the
 # last two are out of scope for this standard.
 CATEGORIES: Dict[str, Dict[str, object]] = {
@@ -535,6 +545,13 @@ class Repo:
     def deployed(self) -> bool:
         return self.record.get("deployed") is True
 
+    @property
+    def writers(self) -> str:
+        """`two`: a designer works in the UI builder's editor, so the lanes, the guard and AGENTS.md apply. `one`:
+        Claude writes the screens too and none of that applies. Unrecorded, a web project has two, as before 2.0;
+        the owner's decision of 2026-10-30 is two writers only where a designer is in the editor now."""
+        return "one" if self.record.get("writers") == "one" else "two"
+
     def flag(self, key: str, default: bool = False) -> bool:
         """A true-or-false fact from the record, else the category's default, else `default`."""
         value = self.record.get(key)
@@ -544,8 +561,17 @@ class Repo:
         return implied if isinstance(implied, bool) else default
 
     @property
+    def category(self) -> Optional[str]:
+        """The owner's category, from the record, else from the Copier answers (a tools repository has no record)."""
+        value = self.record.get("category")
+        if isinstance(value, str) and value in CATEGORIES:
+            return value
+        answered = re.search(r"(?m)^category:\s*(\S+)\s*$", self.read(".copier-answers.yml"))
+        return answered.group(1) if answered and answered.group(1) in CATEGORIES else None
+
+    @property
     def category_defaults(self) -> Dict[str, object]:
-        return CATEGORIES.get(str(self.record.get("category")), {})
+        return CATEGORIES.get(str(self.category), {})
 
     @property
     def exposure(self) -> Optional[str]:
@@ -589,6 +615,26 @@ class Repo:
                     lanes[name] = [str(path) for path in paths]
         return lanes
 
+    def lane_excuse_entries(self) -> Tuple[List[Dict[str, str]], int]:
+        """The commits the owner excused from the lane guard (`lane_guard.allow_commits`), and how many entries do not
+        count. An entry needs `commit` (7 or more hex characters), `reason`, `approved_by` and `date`."""
+        guard = self.record.get("lane_guard")
+        entries = guard.get("allow_commits") if isinstance(guard, dict) else None
+        valid: List[Dict[str, str]] = []
+        for entry in entries if isinstance(entries, list) else []:
+            keys = ("commit", "reason", "approved_by", "date")
+            if isinstance(entry, dict) and all(isinstance(entry.get(key), str) and entry[key].strip() for key in keys):
+                found = {key: entry[key].strip() for key in keys}
+                found["commit"] = found["commit"].lower()
+                if len(found["commit"]) >= 7 and re.fullmatch(r"[0-9a-f]+", found["commit"]):
+                    valid.append(found)
+        return valid, (len(entries) if isinstance(entries, list) else 0) - len(valid)
+
+    def lane_excuse(self, sha: str) -> Optional[Dict[str, str]]:
+        """The owner's entry that excuses the commit with this (abbreviated) id, if any."""
+        sha = sha.lower()
+        return next((e for e in self.lane_excuse_entries()[0] if e["commit"].startswith(sha) or sha.startswith(e["commit"])), None)
+
     @property
     def builder_authors(self) -> List[str]:
         value = self.record.get("builder_authors")
@@ -606,9 +652,14 @@ class Repo:
 
     def builder_lane(self, path: str) -> str:
         """`own`: the UI builder's. `override`: only on the owner's word. `closed`: never."""
+        if path == BUILDER_NOTES:
+            return "own"
         lanes = self.lanes
-        if matches_any(path, lanes.get("shared", []) + lanes.get("server", [])):
+        if matches_any(path, lanes.get("shared", [])):
             return "closed"
+        if matches_any(path, lanes.get("server", [])):
+            # a test the project lists under `builder_tests` is the builder's even where it sits among server code
+            return "own" if is_test_file(path) and matches_any(path, lanes.get("builder_tests", [])) else "closed"
         if matches_any(path, lanes.get("builder", []) + lanes.get("builder_tests", []) + lanes.get("generated", [])):
             return "own"
         return "override" if matches_any(path, lanes.get("override", [])) else "closed"
@@ -737,7 +788,7 @@ def counted(count: int, detail: str = "") -> Result:
 class Rule:
     id: str
     applies: str  # see applies_to(): all, web, service, ... or several joined by +
-    level: str  # must, should
+    level: str  # must, should, or playbook (an item judged when its feature ships; outside the score)
     kind: str  # auto, ratchet, manual
     title: str
     check: Optional[Callable[[Repo], Result]] = None
@@ -750,6 +801,8 @@ def applies_to(rule: Rule, repo: Repo) -> bool:
     conditions: Dict[str, Callable[[], bool]] = {
         "all": lambda: True,
         "web": lambda: repo.is_web,
+        # Two writers: the UI builder writes the screens for a designer, Claude the rest (the lane rules).
+        "builder": lambda: repo.is_web and repo.writers == "two",
         "service": lambda: repo.is_web and repo.back_end == "service",
         "cloud": lambda: repo.is_web and repo.back_end == "lovable-cloud",
         "deployed": lambda: repo.deployed,
@@ -801,15 +854,6 @@ def repo_3(repo: Repo) -> Result:
     if repo.has(".gitattributes") and "eol=lf" in repo.read(".gitattributes"):
         return ok(".gitattributes")
     return bad("neither .editorconfig nor .gitattributes sets LF line endings")
-
-
-def repo_4(repo: Repo) -> Result:
-    owners = repo.first(".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
-    if not owners:
-        return bad("no CODEOWNERS file")
-    if not re.search(r"(?m)^\*\s+@\S+", repo.read(owners)):
-        return bad(f"{owners} has no `* @owner` line")
-    return ok(owners)
 
 
 def repo_5(repo: Repo) -> Result:
@@ -908,17 +952,6 @@ def ci_5(repo: Repo) -> Result:
             if not re.search(r"@[0-9a-f]{40}\Z", ref):
                 unpinned.append(f"{name}: {ref}")
     return counted(len(unpinned), "; ".join(unpinned[:5]))
-
-
-def ci_6(repo: Repo) -> Result:
-    missing = 0
-    where = []
-    for name, text in repo.workflows().items():
-        lacking = jobs_without_timeout(text)
-        if lacking:
-            missing += lacking
-            where.append(name)
-    return counted(missing, ", ".join(sorted(where)[:5]))
 
 
 def ci_7(repo: Repo) -> Result:
@@ -1071,6 +1104,56 @@ def test_2(repo: Repo) -> Result:
     return bad("no coverage floor is configured")
 
 
+# Names of coverage tools. Only a use counts: an import, a require, a package dependency, a reporter entry in the
+# Playwright configuration, or a call to Playwright's coverage API. The bare word does not (NYC and Istanbul are
+# cities in test data).
+COVERAGE_PACKAGE = r"(?:nyc|c8|istanbul[\w-]*|@istanbuljs/[\w-]+|monocart-[\w-]+|v8-to-istanbul|[\w-]*plugin-istanbul)"
+COVERAGE_IMPORT = re.compile(r"""(?:\bfrom\s+|\brequire\(\s*|\bimport\(\s*|\bimport\s+)['"]""" + COVERAGE_PACKAGE + r"""(?:/[^'"]*)?['"]""")
+COVERAGE_REPORTER = re.compile(r"""['"]""" + COVERAGE_PACKAGE + r"""(?:/[^'"]*)?['"]""")
+COVERAGE_CALL = re.compile(r"\.(?:startJSCoverage|stopJSCoverage|startCSSCoverage|stopCSSCoverage)\b|\bpage\.coverage\b|\bcollectCoverage\b")
+COVERAGE_CODE = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts")
+
+
+def test_7(repo: Repo) -> Result:
+    """TEST-7: no coverage tool wraps the browser tests (the kit's own folder is the template's and is not read)."""
+    folder = [n for n in repo.files if n.startswith("e2e/") and not n.startswith("e2e/kit/") and "node_modules/" not in n]
+    if not folder:
+        return na("no browser-test folder")
+    found = []
+    for name in folder:
+        base = name.rpartition("/")[2]
+        text = None
+        if base == "package.json":
+            try:
+                data = json.loads(repo.read(name))
+            except ValueError:
+                continue
+            packages = {k for key in ("dependencies", "devDependencies", "optionalDependencies") for k in (data.get(key) or {})}
+            if any(re.fullmatch(COVERAGE_PACKAGE, k) for k in packages):
+                found.append(name)
+        elif name.endswith(COVERAGE_CODE):
+            text = repo.read(name)
+            is_config = re.match(r"playwright[^/]*\.config\.", base) is not None
+            if COVERAGE_IMPORT.search(text) or COVERAGE_CALL.search(text) or (is_config and COVERAGE_REPORTER.search(text)):
+                found.append(name)
+    return bad("coverage tooling in " + ", ".join(sorted(found)[:5])) if found else ok()
+
+
+def test_8(repo: Repo) -> Result:
+    """TEST-8: `coverage_exclude` in the record is a list of patterns, each with a reason."""
+    entries = repo.record.get("coverage_exclude")
+    if entries is None:
+        return ok("no exclusion list, so every file counts")
+    if not isinstance(entries, list):
+        return bad("coverage_exclude is not a list")
+    missing = [
+        str(e.get("pattern", e) if isinstance(e, dict) else e)
+        for e in entries
+        if not (isinstance(e, dict) and str(e.get("pattern", "")).strip() and str(e.get("reason", "")).strip())
+    ]
+    return bad("no pattern or no reason: " + ", ".join(missing[:5])) if missing else ok(f"{len(entries)} patterns, each with a reason")
+
+
 def test_3(repo: Repo) -> Result:
     sources = repo.source_files()
     has_ts = sum(name.endswith((".ts", ".tsx")) for name in sources) >= TYPED_LANGUAGE_FILES
@@ -1105,20 +1188,6 @@ def sec_1(repo: Repo) -> Result:
 
 
 # checks: work tracking ------------------------------------------------------
-
-
-def work_2(repo: Repo) -> Result:
-    log = git(repo.root, "log", "--no-merges", "-n", "100", "--format=%an%x09%s")
-    if log is None:
-        return na("no git history")
-    odd = []
-    for line in log.splitlines():
-        author, _, subject = line.partition("\t")
-        if author.endswith("[bot]") or author in repo.builder_authors:
-            continue
-        if not 10 <= len(subject) <= 120:
-            odd.append(subject[:40].strip())
-    return counted(len(odd), "; ".join(odd[:3]))
 
 
 PROGRESS_FILE = re.compile(r"(?i)(\A|/)(roadmap|todo|to-do|backlog)(\.[a-z]+)?\Z")
@@ -1304,6 +1373,8 @@ def net_4(repo: Repo) -> Result:
 
 
 FIXED_TMP = re.compile(r"[\"'`](/tmp/[A-Za-z0-9_.-]+)")
+# A path on another machine is not this program's temporary file: the line is an ssh, scp or rsync command.
+REMOTE_COMMAND = re.compile(r"(^|[\s;&|(])(ssh|scp|rsync|sftp)\s")
 
 
 def tmp_2(repo: Repo) -> Result:
@@ -1316,7 +1387,7 @@ def tmp_2(repo: Repo) -> Result:
         ):
             continue
         for line in repo.read(name).splitlines():
-            if not COMMENT_LINE.match(line) and FIXED_TMP.search(line):
+            if not COMMENT_LINE.match(line) and FIXED_TMP.search(line) and not REMOTE_COMMAND.search(line):
                 found[name] = found.get(name, 0) + 1
     where = ", ".join(f"{n} {c}" for n, c in sorted(found.items())[:5])
     return counted(sum(found.values()), where)
@@ -1372,8 +1443,13 @@ def read_exceptions(repo: Repo) -> Tuple[Dict[str, str], List[str]]:
     problems: List[str] = []
     for index, entry in enumerate(exceptions):
         rule = entry.get("rule") if isinstance(entry, dict) else None
-        if not isinstance(rule, str) or rule not in known:
-            problems.append(f"entry {index + 1}: unknown rule")
+        if not isinstance(rule, str) or not re.fullmatch(r"[A-Z0-9]+-\d+", rule):
+            problems.append(f"entry {index + 1}: no rule")
+            continue
+        if rule not in known:
+            # A waiver of a rule an earlier version had (3.0 retired the manual rules): stale, not wrong.
+            valid.setdefault("__stale__", "")
+            valid["__stale__"] += ("" if not valid["__stale__"] else ", ") + rule
             continue
         wrong = [key for key in ("reason", "approved_by") if not (isinstance(entry.get(key), str) and entry[key].strip())]
         if not re.match(r"\d{4}-\d{2}-\d{2}\Z", str(entry.get("date", ""))):
@@ -1389,7 +1465,13 @@ def read_exceptions(repo: Repo) -> Tuple[Dict[str, str], List[str]]:
 
 def layout_2(repo: Repo) -> Result:
     valid, problems = read_exceptions(repo)
-    return bad("; ".join(problems)) if problems else ok(f"{len(valid)} recorded")
+    stale = valid.pop("__stale__", "")
+    if problems:
+        return bad("; ".join(problems))
+    note = f"{len(valid)} recorded"
+    if stale:
+        note += f"; stale, for rules an earlier version had, ignored (delete when convenient): {stale}"
+    return ok(note)
 
 
 RESERVED_ROOT = ("package.json", "index.html", "tsconfig.json")
@@ -1467,13 +1549,6 @@ def lane_1(repo: Repo) -> Result:
     return ok()
 
 
-def lane_2(repo: Repo) -> Result:
-    if not repo.has("AGENTS.md"):
-        return bad("no AGENTS.md")
-    size = len(repo.read("AGENTS.md"))
-    return ok(f"{size} characters") if size < 5000 else bad(f"{size} characters")
-
-
 def lane_3(repo: Repo) -> Result:
     if repo.record_error:
         return bad(repo.record_error)
@@ -1509,7 +1584,7 @@ def builder_commits(repo: Repo, revision_args: List[str]) -> Optional[List[Tuple
 
 def out_of_lane(repo: Repo, commits: List[Tuple[str, List[str]]], lane: str = "closed") -> List[Tuple[str, str]]:
     """The UI builder's changes to paths that are closed to it, or to paths it may write only under an override."""
-    return [(sha, path) for sha, files in commits for path in files if repo.builder_lane(path) == lane]
+    return [(sha, path) for sha, files in commits if not repo.lane_excuse(sha) for path in files if repo.builder_lane(path) == lane]
 
 
 def lane_4(repo: Repo) -> Result:
@@ -1637,7 +1712,7 @@ def i18n_1(repo: Repo) -> Result:
 # checks: added in version 0.2 -------------------------------------------------
 
 VERSION_FORMAT = re.compile(r"\A20\d\d\.(?:[1-9]|1[0-2])\.(?:0|[1-9]\d*)\Z")
-RECORD_FACTS = {"exposure": ("public", "lan", "none"), "phone_apps": ("none", "planned", "shipping")}
+RECORD_FACTS = {"exposure": ("public", "lan", "none"), "phone_apps": ("none", "planned", "shipping"), "writers": ("one", "two")}
 
 
 def layout_5(repo: Repo) -> Result:
@@ -1649,6 +1724,8 @@ def layout_5(repo: Repo) -> Result:
         problems.append("accounts (or a category)")
     if repo.is_web and record.get("phone_apps") not in RECORD_FACTS["phone_apps"]:
         problems.append("phone_apps")
+    if "writers" in record and record["writers"] not in RECORD_FACTS["writers"]:
+        problems.append("writers (one or two)")
     return bad("missing or wrong in standard.json: " + ", ".join(problems)) if problems else ok()
 
 
@@ -1740,336 +1817,113 @@ RULES: List[Rule] = [
     Rule("REPO-1", "all", "must", "auto", "README says what the project is", repo_1),
     Rule("REPO-2", "all", "should", "auto", ".gitignore covers personal agent files", repo_2),
     Rule("REPO-3", "all", "should", "auto", "LF line endings", repo_3),
-    Rule("REPO-4", "all", "should", "auto", "CODEOWNERS names an owner", repo_4),
     Rule("REPO-5", "all", "should", "auto", "Pull request template", repo_5),
-    Rule("REPO-6", "all", "must", "manual", "Code and documentation only, no user content"),
-    Rule("REPO-7", "all", "must", "manual", "Pushed history on main is never rewritten"),
     Rule("REPO-8", "all", "must", "auto", "LICENSE file", repo_8, older="should"),
     Rule("AGENT-1", "all", "must", "auto", "CLAUDE.md names the check command", agent_1),
     Rule("AGENT-2", "all", "must", "auto", ".claude/settings.json denies reading secrets", agent_2),
-    Rule("AGENT-3", "all", "should", "manual", "Every agent rule carries its reason"),
-    Rule("AGENT-4", "all", "must", "manual", "Spending and live data need the owner's go-ahead"),
-    Rule("AGENT-5", "all", "must", "manual", "Other repositories are read-only"),
     Rule("CI-1", "all", "must", "auto", "One command runs every check", ci_1),
     Rule("CI-2", "all", "must", "auto", "CI runs that command", ci_2),
     Rule("CI-3", "all", "must", "auto", "Push runs are for main only", ci_3),
     Rule("CI-4", "all", "must", "auto", "Every workflow declares permissions", ci_4),
     Rule("CI-5", "all", "must", "ratchet", "Actions pinned to a commit SHA", ci_5, older="should"),
-    Rule("CI-6", "all", "should", "ratchet", "Every job sets a timeout", ci_6),
     Rule("CI-7", "all", "must", "auto", "Jobs name a runner from ci_runners", ci_7),
     Rule("CI-8", "all", "should", "auto", "Newer commit cancels the older run", ci_8),
-    Rule("CI-9", "all", "must", "manual", "No test deleted or skipped to get green"),
     Rule("CI-10", "all", "must", "ratchet", "No job stops or borrows a process it did not start", ci_10),
     Rule("DEP-1", "all", "must", "auto", "One package manager, lockfile committed", dep_1),
     Rule("DEP-2", "all", "must", "auto", "CI installs from the lockfile", dep_2),
     Rule("DEP-3", "all", "must", "auto", "Packages under 24 hours old are not installed", dep_3),
-    Rule("DEP-4", "all", "must", "manual", "No dependency change unasked"),
     Rule("DEP-5", "all", "must", "auto", "Automated dependency updates", dep_5, older="should"),
-    Rule("DEP-6", "all", "should", "manual", "Downloaded tools are pinned and verified"),
     Rule("TEST-1", "all", "must", "auto", "Tests exist", test_1),
     Rule("TEST-2", "all", "must", "auto", "A coverage floor is configured", test_2),
     Rule("TEST-3", "all", "must", "auto", "Static types are strict", test_3, older="should"),
     Rule("TEST-4", "all", "must", "auto", "Lint and format checks run in CI", test_4, older="should"),
-    Rule("TEST-5", "all", "should", "manual", "A bug fix ships with a failing-first test"),
-    Rule("TEST-6", "all", "must", "manual", "Tests never reach a real service or real data"),
+    Rule("TEST-7", "web", "must", "auto", "No coverage tool wraps the browser tests", test_7, older="should"),
+    Rule("TEST-8", "all", "must", "auto", "Coverage exclusions are a closed list, each with a reason", test_8, older="should"),
     Rule("SEC-1", "all", "must", "auto", "Secret scan in CI", sec_1),
-    Rule("SEC-2", "all", "must", "manual", "No secret in the repository"),
-    Rule("SEC-3", "all", "should", "manual", "Allowlist entries carry a reason"),
-    Rule("SEC-4", "all", "should", "manual", "Destructive workflows need a typed confirmation"),
-    Rule("SEC-5", "all", "must", "manual", "User content never goes to a translation service"),
-    Rule("WORK-1", "all", "must", "manual", "Open work is a GitHub issue"),
-    Rule("WORK-2", "all", "should", "ratchet", "Commit subjects: 10 to 120 characters", work_2),
-    Rule("WORK-3", "all", "should", "manual", "A commit names its issue"),
     Rule("WORK-4", "all", "must", "auto", "No roadmap, to-do or backlog kept in a file", work_4),
-    Rule("LOG-1", "all", "must", "manual", "No personal data or user content in logs or error reports"),
-    Rule("LOG-2", "all", "must", "manual", "No secrets, tokens or session ids in logs"),
     Rule("LOG-3", "all", "must", "ratchet", "Outside logging services are named and approved per project", log_3),
-    Rule("LOG-4", "all", "should", "manual", "An error is logged once, with a code and a request id"),
-    Rule("LOG-5", "all", "should", "manual", "Logs are kept for a stated time, then deleted"),
     Rule("LAYOUT-1", "all", "must", "auto", "standard.json exists and is valid", layout_1),
     Rule("LAYOUT-2", "all", "must", "auto", "Exceptions are recorded in full", layout_2),
     Rule("LAYOUT-3", "no-web", "must", "auto", "Root left free for a future front end (new projects)", layout_3),
     Rule("LAYOUT-4", "all", "should", "auto", "Template version recorded", layout_4),
     Rule("OPS-1", "deployed", "must", "auto", "An address reports the running commit", ops_1),
-    Rule("OPS-2", "deployed", "must", "manual", "No session, no access"),
-    Rule("OPS-3", "deployed", "must", "manual", "A failed deploy check rolls back"),
-    Rule("OPS-4", "deployed", "must", "manual", "Deploy waits for a person when it should"),
-    Rule("OPS-5", "deployed", "must", "manual", "Contract changes are additive"),
     Rule("OPS-6", "service", "must", "auto", "api-requires.json states the needed revision", ops_6),
-    Rule("LANE-1", "web", "must", "auto", "AGENTS.md has a section on lanes", lane_1),
-    Rule("LANE-2", "web", "should", "auto", "AGENTS.md under 5,000 characters", lane_2),
-    Rule("LANE-3", "web", "must", "auto", "Lanes and back-end shape are declared", lane_3),
-    Rule("LANE-4", "web", "should", "ratchet", "The UI builder stays in its lanes", lane_4),
-    Rule("LANE-5", "web", "must", "auto", "CI runs the lane guard", lane_5),
-    Rule("LANE-6", "web", "must", "manual", "Tests travel with screens"),
-    Rule("LANE-7", "web", "must", "manual", "The builder's branch is never rewritten or deleted"),
-    Rule("LANE-8", "web", "must", "manual", "One issue per request, data first"),
-    Rule("LANE-9", "web", "must", "manual", "The builder does only that issue"),
-    Rule("LANE-10", "web", "must", "manual", "Own branch and guarded merge where the editor is used daily or main deploys itself"),
-    Rule("LANE-11", "web", "must", "auto", "No file over 10 MB", lane_11),
+    Rule("LANE-1", "builder", "must", "auto", "AGENTS.md has a section on lanes", lane_1),
+    Rule("LANE-3", "builder", "must", "auto", "Lanes and back-end shape are declared", lane_3),
+    Rule("LANE-4", "builder", "should", "ratchet", "The UI builder stays in its lanes", lane_4),
+    Rule("LANE-5", "builder", "must", "auto", "CI runs the lane guard", lane_5),
+    Rule("LANE-11", "builder", "must", "auto", "No file over 10 MB", lane_11),
     Rule("DATA-1", "web", "must", "ratchet", "No network call in the UI builder's files", data_1),
-    Rule("DATA-2", "service", "must", "manual", "The app runs with no back end, on sample data"),
-    Rule("DATA-3", "service", "must", "manual", "Sample data is checked against the contract"),
-    Rule("DATA-4", "web", "must", "manual", "A 401 goes to sign-in, in one place"),
-    Rule("DATA-5", "web", "must", "manual", "Errors are fixed sentences"),
     Rule("DATA-6", "web", "must", "ratchet", "No fonts, scripts or styles from another origin", data_6),
     Rule("DATA-7", "service", "must", "auto", "Lovable Cloud is off", data_7),
-    Rule("CLOUD-1", "cloud", "must", "manual", "No schema or live-data change without an override"),
-    Rule("CLOUD-2", "cloud", "must", "manual", "Migrations apply from an empty database in CI"),
-    Rule("CLOUD-3", "cloud", "must", "manual", "Every new access policy ships with a test"),
     Rule("UI-1", "web", "must", "auto", "One component library (shadcn/ui)", ui_1),
     Rule("UI-2", "web", "must", "ratchet", "No raw controls outside the library", ui_2),
     Rule("UI-3", "web", "should", "ratchet", "No hex colours in screens", ui_3),
-    Rule("UI-4", "web", "must", "manual", "No names or content in an address"),
     Rule("MOBILE-1", "web", "must", "auto", "Phone-size browser tests on Chromium and WebKit in CI", mobile_1),
-    Rule("MOBILE-2", "web", "must", "manual", "Nothing scrolls sideways at 360 px"),
     Rule("MOBILE-3", "web", "must", "ratchet", "Heights use dvh, never vh or h-screen", mobile_3),
-    Rule("MOBILE-4", "web", "should", "manual", "Phone Back closes the top dialog"),
-    Rule("A11Y-1", "web", "must", "manual", "Target WCAG 2.2 AA, stated honestly"),
     Rule("A11Y-2", "web", "must", "auto", "Accessibility is measured against a baseline", a11y_2),
     Rule("A11Y-3", "web", "must", "auto", "A control list names the test for every control", a11y_3),
-    Rule("A11Y-4", "web", "should", "manual", "Landmarks, heading, title, skip link, reduced motion"),
-    Rule("A11Y-5", "web", "should", "manual", "Contrast from tokens meets 4.5 and 3"),
-    Rule("A11Y-6", "web", "must", "manual", "No screenshots of real content; fixture data only"),
-    Rule("A11Y-7", "web", "must", "manual", "Text for users reads at grade 11 or lower"),
     Rule("I18N-1", "web", "must", "auto", "The page declares its language", i18n_1),
-    Rule("I18N-2", "web", "must", "manual", "Text is ready to translate", older="should"),
     Rule("VER-1", "app", "must", "auto", "The version is YYYY.M.N, in one file", ver_1, older="should"),
-    Rule("VER-2", "app", "must", "manual", "A release is cut when there is something to tell"),
-    Rule("VER-3", "app", "must", "manual", "Every build carries its full id"),
-    Rule("VER-4", "app", "should", "manual", "CI tags each release"),
-    Rule("VER-5", "split", "should", "manual", "Each repository of a split app has its own version"),
-    Rule("UPD-2", "all", "must", "manual", "A weekly vulnerability scan; findings become issues"),
-    Rule("UPD-3", "all", "must", "manual", "Security fixes within the time limits"),
-    Rule("UPD-4", "all", "must", "manual", "Skipping the 24-hour wait needs the owner's word"),
-    Rule("UPD-5", "deployed", "must", "manual", "Security fixes go through the same checks"),
-    Rule("UPD-6", "all", "must", "manual", "A switched-off scan keeps a date to look again"),
-    Rule("UPD-8", "public", "must", "manual", "SECURITY.md says how to report a problem"),
-    Rule("BKP-1", "data", "must", "manual", "Everything that cannot be made again is listed with its backup"),
-    Rule("BKP-2", "data", "must", "manual", "Backed up every day, files included"),
-    Rule("BKP-3", "data", "must", "manual", "Backups are kept for a stated time"),
-    Rule("BKP-4", "data", "must", "manual", "A copy outside the reach of one failure"),
-    Rule("BKP-5", "data", "must", "manual", "Restores are rehearsed"),
-    Rule("BKP-6", "data", "must", "manual", "A missed backup is noticed within a day"),
-    Rule("BKP-7", "data", "must", "manual", "Backups are kept as carefully as the original"),
-    Rule("BKP-8", "data", "must", "manual", "A checked backup before a migration that changes data"),
-    Rule("BKP-9", "public+data", "must", "manual", "Deleted data leaves the backups when they expire"),
-    Rule("BKP-10", "all", "must", "manual", "Git is not a backup for content"),
-    Rule("AUTH-1", "accounts", "must", "manual", "Every address needs a sign-in unless listed as public"),
-    Rule("AUTH-2", "accounts", "must", "manual", "Sign-in fails closed"),
-    Rule("AUTH-3", "accounts", "must", "manual", "One sign-in module"),
-    Rule("AUTH-4", "passwords", "must", "manual", "Passwords and tokens stored as slow hashes"),
-    Rule("AUTH-5", "passwords", "must", "manual", "Failed sign-ins are slowed, then locked"),
-    Rule("AUTH-6", "accounts", "must", "manual", "Sessions end on time and on a password change"),
-    Rule("AUTH-7", "accounts", "must", "manual", "No open sign-up unless recorded"),
-    Rule("AUTH-8", "public", "must", "manual", "HTTPS only, secure cookies"),
-    Rule("AUTH-9", "public+accounts", "must", "manual", "Administrators use a second factor or a passkey"),
-    Rule("AUTH-10", "accounts", "should", "manual", "People can end their sessions; tokens expire"),
-    Rule("ROLE-1", "accounts", "must", "manual", "Refused unless allowed, from one permission table"),
-    Rule("ROLE-2", "accounts", "must", "manual", "Checked on the server, never by hiding"),
-    Rule("ROLE-3", "accounts", "must", "manual", "Roles in a table of their own, read through one function"),
-    Rule("ROLE-4", "accounts", "must", "manual", "The minimum roles, mapped in the record"),
-    Rule("ROLE-5", "accounts", "must", "manual", "The last administrator stays; role changes are recorded"),
-    Rule("ROLE-6", "lan+accounts", "must", "manual", "Home app: an administrator's look into a silo is logged"),
-    Rule("ROLE-7", "accounts", "must", "manual", "Nobody gives themselves a role"),
-    Rule("ROLE-8", "accounts", "should", "manual", "Rights are read live"),
-    Rule("ROLE-9", "public+accounts", "must", "manual", "Public app: administrators cannot see into a silo"),
-    Rule("SILO-1", "accounts", "must", "manual", "The record names the silo"),
-    Rule("SILO-2", "accounts", "must", "manual", "Everything stored belongs to one silo, enforced"),
-    Rule("SILO-3", "accounts", "must", "manual", "Only members reach a silo"),
-    Rule("SILO-4", "accounts", "must", "manual", "A cross-silo test for each kind of data"),
-    Rule("SILO-5", "accounts", "must", "manual", "Nothing looks things up across silos"),
-    Rule("SILO-6", "accounts", "must", "manual", "Test and demo environments have their own data"),
-    Rule("SILO-7", "public+accounts", "must", "manual", "An owner can export and delete their silo"),
-    Rule("SILO-8", "public+accounts", "should", "manual", "Shared machines are shared fairly"),
-    Rule("AUDIT-1", "accounts", "must", "manual", "An audit log of what the table below lists"),
-    Rule("AUDIT-2", "accounts", "must", "manual", "The audit log is append-only, tested"),
-    Rule("AUDIT-3", "accounts", "must", "manual", "Audit rows hold ids, not names or emails"),
-    Rule("AUDIT-4", "accounts", "must", "manual", "The audit log is never purged and is backed up"),
-    Rule("AUDIT-5", "accounts", "should", "manual", "Administrators can read it in the app"),
-    Rule("AUDIT-6", "public+accounts", "should", "manual", "A daily comparison with the last backup"),
-    Rule("ADMIN-1", "public+accounts", "must", "manual", "An About page for administrators"),
-    Rule("ADMIN-2", "accounts", "must", "manual", "Secrets shown only as present or a fingerprint"),
-    Rule("ADMIN-3", "accounts", "must", "manual", "The copied report holds no personal data"),
-    Rule("ADMIN-4", "split", "must", "manual", "A split app shows both halves' build ids"),
-    Rule("RLS-1", "cloud", "must", "manual", "Row security on every table"),
-    Rule("RLS-2", "cloud", "must", "manual", "Nothing granted to visitors unless listed"),
-    Rule("RLS-3", "cloud", "must", "manual", "New functions are closed, then granted"),
-    Rule("RLS-4", "cloud", "must", "manual", "The service key never reaches the browser"),
-    Rule("RLS-5", "cloud", "must", "manual", "Stored files in private buckets with tested policies"),
-    Rule("RLS-6", "cloud", "should", "manual", "Policies are fast"),
-    Rule("RLS-7", "cloud", "must", "manual", "The platform's own schemas are never changed"),
     Rule("MOBILE-5", "web", "must", "auto", "The page fills the screen around the notch", mobile_5, older="should", blocks=False),
     Rule("MOBILE-6", "web", "must", "auto", "Text fields are 16 px on a phone", mobile_6, older="should", blocks=False),
     Rule("MOBILE-7", "web", "must", "auto", "Dialogs have a height limit and scroll inside it", mobile_7, older="should", blocks=False),
-    Rule("MOBILE-8", "web", "should", "manual", "Tap targets 24 px at least, never under a fixed bar"),
     Rule("APP-1", "phone", "must", "auto", "The phone-app decisions are answered", app_1, older="should", blocks=False),
-    Rule("APP-2", "phone", "must", "manual", "A release job fails on a missing secret"),
-    Rule("APP-3", "phone", "must", "manual", "An emulator and simulator smoke test per release"),
-    Rule("APP-4", "phone", "must", "manual", "Store forms and privacy files come from one data list"),
-    Rule("APP-5", "phone", "must", "manual", "Signing keys have a copy outside git and GitHub"),
-    Rule("HELP-1", "help", "must", "manual", "Help is Markdown, one file per role, shown in the app"),
-    Rule("HELP-2", "help+accounts", "must", "manual", "The administrators' guide never reaches other browsers"),
-    Rule("HELP-3", "help+accounts", "must", "manual", "Help for changed screens is reviewed at each release"),
-    Rule("HELP-4", "help+accounts", "should", "manual", "Help is checked for reading level and stale names"),
-    Rule("HELP-5", "help+accounts", "should", "manual", "Release notes go to the right readers"),
     Rule("PUB-1", "web", "must", "auto", "robots.txt exists and fits the exposure", pub_1, older="should", blocks=False),
-    Rule("PUB-7", "web", "must", "manual", "Not published on the builder's hosting unless recorded"),
-    Rule("PUB-2", "public", "should", "manual", "sitemap.xml: public pages for all, full list for the scanner"),
-    Rule("PUB-3", "public", "must", "manual", "The API description needs a credential"),
-    Rule("PUB-4", "public", "must", "manual", "security.txt with a contact and an expiry date"),
-    Rule("PUB-5", "public", "must", "manual", "Hosts that are not production say noindex"),
-    Rule("PUB-6", "public+passwords", "should", "manual", "A change-password address for password managers"),
-    Rule("LEGAL-1", "public+accounts", "must", "manual", "Legal documents are versioned Markdown"),
-    Rule("LEGAL-2", "public+accounts", "must", "manual", "An append-only acceptance history"),
-    Rule("LEGAL-3", "public+accounts", "must", "manual", "Every binding document is on the gate"),
-    Rule("LEGAL-4", "public+accounts", "must", "manual", "One function decides acceptance, used everywhere"),
-    Rule("LEGAL-5", "public+accounts", "must", "manual", "The owner marks each new version material or not"),
-    Rule("LEGAL-6", "public+accounts", "should", "manual", "A new version is tried on a demo first"),
-    Rule("LEGAL-7", "public+accounts", "should", "manual", "Legal text enters through the import script"),
-    Rule("CONSENT-1", "public", "must", "manual", "Nothing non-essential loads before consent"),
-    Rule("CONSENT-2", "public", "must", "manual", "The choice is stored and every change audited"),
-    Rule("CONSENT-3", "public", "must", "manual", "Withdrawing is as easy as agreeing"),
-    Rule("CONSENT-4", "public", "must", "manual", "Strictly necessary services are recorded"),
-    Rule("CONSENT-5", "public", "must", "manual", "One consent rule everywhere"),
-    Rule("RET-1", "public+accounts", "must", "manual", "One retention table matches the privacy policy"),
-    Rule("RET-2", "public+accounts", "must", "manual", "Every timer has a runbook row and an alarm"),
-    Rule("RET-3", "public+accounts", "must", "manual", "Deleted data is unreadable, and gone after 30 days"),
-    Rule("RET-4", "public+accounts", "must", "manual", "Deleting an account deletes everywhere"),
-    Rule("RET-5", "public+accounts", "must", "manual", "A restore replays the deletion log; backups kept 90 days"),
-    Rule("RET-6", "public+accounts", "must", "manual", "Timers never default to production"),
-    Rule("RET-7", "public+accounts", "must", "manual", "Every account type can export and delete its data"),
-    Rule("DEMO-1", "public+accounts", "must", "manual", "A demo has its own hosting and database"),
-    Rule("DEMO-2", "public+accounts", "must", "manual", "One command builds a demo from main"),
-    Rule("DEMO-3", "public+accounts", "must", "manual", "Demo data from named fixture states"),
-    Rule("DEMO-4", "public+accounts", "must", "manual", "Outside services are off on a demo"),
-    Rule("DEMO-5", "public+accounts", "should", "manual", "A demo is rebuilt after every migration"),
-    Rule("DEMO-6", "public+accounts", "must", "manual", "A demo says noindex"),
-    Rule("DAST-1", "public+accounts", "must", "manual", "Scans use a scan server with fixture data"),
-    Rule("DAST-2", "public+accounts", "must", "manual", "One scan account per role, seeded and proved"),
-    Rule("DAST-3", "public+accounts", "must", "manual", "The scanner's key works only in test mode"),
-    Rule("DAST-4", "public+accounts", "should", "manual", "The app tells the scanner it is signed in"),
-    Rule("DAST-5", "public+accounts", "must", "manual", "Actions that end the session are excluded"),
-    Rule("DAST-6", "public+accounts", "must", "manual", "Never scan production or a published Lovable app"),
-    Rule("DAST-7", "public+accounts", "must", "manual", "The scan server is rebuilt and ready before each scan"),
-    Rule("DAST-8", "public+accounts", "must", "manual", "The scanner's addresses are let in on the scan host only"),
-    Rule("DAST-9", "public+accounts", "must", "manual", "ZAP scans in CI on every release"),
-    Rule("NET-1", "home", "must", "manual", "Every outside destination is listed in the record"),
-    Rule("NET-2", "home", "must", "manual", "Nothing goes to an unlisted destination"),
-    Rule("NET-3", "home", "must", "manual", "Built-in telemetry is switched off"),
     Rule("NET-4", "home", "must", "ratchet", "No unlisted outside destination in the code", net_4),
-    Rule("NET-5", "home+web", "must", "manual", "The browser tests report the hosts the app contacts"),
-    Rule("MOBILE-9", "web", "must", "manual", "Lists and grids show thumbnails, never originals"),
     Rule("MOBILE-10", "web", "should", "ratchet", "Pictures load lazily", mobile_10, blocks=False),
-    Rule("MOBILE-11", "web", "must", "manual", "A part on every page fetches only what the viewer sees"),
-    Rule("MOBILE-12", "web", "should", "manual", "The browser tests report each screen's weight"),
-    Rule("DATA-8", "web", "must", "manual", "Paged lists are followed to the end"),
-    Rule("DATA-9", "web", "should", "manual", "The data-fetching defaults are written down and tested"),
-    Rule("SILO-9", "accounts", "must", "manual", "No row limit is shared across silos"),
-    Rule("CI-11", "all", "must", "manual", "A merge waits for green checks; a red main comes first"),
-    Rule("REPO-9", "all", "must", "manual", "Pull requests merge with a merge commit"),
-    Rule("AGENT-6", "all", "must", "manual", "AI-written commits end with a co-author line"),
-    Rule("TMP-1", "all", "must", "manual", "The project states where it writes"),
     Rule("TMP-2", "all", "must", "ratchet", "No fixed paths in /tmp", tmp_2),
-    Rule("TMP-3", "all", "should", "manual", "A cache has a size or age limit"),
-    Rule("TMP-4", "all", "must", "manual", "CI scratch goes to RUNNER_TEMP"),
     Rule("TMP-5", "all", "must", "auto", "The checks leave the checkout clean", tmp_5, older="should"),
-    Rule("TMP-6", "all", "must", "manual", "An agent's scratch stays out of the repository"),
-    Rule("WORK-5", "all", "should", "manual", "A friction log, added to at the end of each piece of work"),
-    Rule("WORK-6", "all", "should", "manual", "Repeated friction becomes a tool proposal"),
-    Rule("WORK-7", "all", "should", "manual", "A friction fix is dated and measured again"),
-    Rule("WORK-8", "all", "should", "manual", "Branch names start with the issue number"),
     Rule("LAYOUT-6", "all", "should", "auto", "The category agrees with the record's facts", layout_6),
     Rule("LAYOUT-5", "all", "must", "auto", "The record states exposure, accounts and phone plans", layout_5, older="should"),
-    Rule("CONST-1", "app", "must", "manual", "Limits and durations live in one module"),
-    Rule("CONST-2", "app", "must", "manual", "Host names live in one file"),
-    Rule("CONST-3", "app", "must", "manual", "Every free-text field has a length limit"),
-    Rule("CONST-4", "web", "should", "manual", "Text shown to people follows I18N-2"),
-    Rule("INVITE-1", "accounts", "must", "manual", "The record says who may invite whom"),
-    Rule("INVITE-2", "accounts", "must", "manual", "Invitation rights are enforced and tested"),
-    Rule("INVITE-3", "accounts", "must", "manual", "A silo owner invites into their own silo only"),
-    Rule("INVITE-4", "public+accounts", "must", "manual", "Invitations per inviter are limited per day"),
-    Rule("INVITE-5", "accounts", "must", "manual", "An invitation grants nothing until accepted"),
-    Rule("INVITE-6", "accounts", "must", "manual", "Invitations expire after 14 days by default"),
-    Rule("INVITE-7", "accounts", "must", "manual", "The inviter is told the truth"),
-    Rule("INVITE-8", "accounts", "must", "manual", "Invitations are in the audit log"),
-    Rule("USERS-1", "accounts", "must", "manual", "A users page with search, filters and paging"),
-    Rule("USERS-2", "accounts", "must", "manual", "Last sign-in is recorded without consent"),
-    Rule("USERS-3", "accounts", "must", "manual", "Stale accounts are listed, never disabled automatically"),
-    Rule("USERS-4", "accounts", "must", "manual", "Administrators manage accounts from the page"),
-    Rule("USERS-5", "accounts", "must", "manual", "Each account's audit history; view-only cannot change"),
-    Rule("NOTIFY-1", "notifications", "must", "manual", "One list of notification kinds"),
-    Rule("NOTIFY-2", "notifications", "must", "manual", "Per-kind switches and one pause for all"),
-    Rule("NOTIFY-3", "notifications", "must", "manual", "Permission is asked only after the person acts"),
-    Rule("NOTIFY-4", "notifications", "must", "manual", "A push or text says what happened, not the content"),
-    Rule("NOTIFY-5", "notifications", "must", "manual", "Failed deliveries are retried and raise an alarm"),
-    Rule("NOTIFY-6", "notifications", "must", "manual", "Marketing is opt-in and stops with one click"),
-    Rule("NOTIFY-7", "notifications", "must", "manual", "Text messages only with the owner's approval"),
-    Rule("NOTIFY-8", "notifications", "should", "manual", "Phone browser and phone app share the switches"),
-    Rule("LIC-1", "licensing", "must", "manual", "One licence record per silo"),
-    Rule("LIC-2", "licensing", "must", "manual", "Every limit is listed and enforced on the server"),
-    Rule("LIC-3", "licensing", "must", "manual", "Read-only at expiry, deleted after a stated grace"),
-    Rule("LIC-4", "licensing", "must", "manual", "Silo owners are warned before expiry"),
-    Rule("LIC-5", "licensing", "must", "manual", "Licence changes are audited"),
-    Rule("LIC-6", "licensing", "must", "manual", "Declined card, expiry and purge are tested first"),
-    Rule("PREVIEW-1", "previews", "must", "manual", "Preview features are listed with an owner"),
-    Rule("PREVIEW-2", "previews", "must", "manual", "A preview is on only when made available and opted into"),
-    Rule("PREVIEW-3", "previews", "must", "manual", "Consent before a preview sends data out"),
-    Rule("PREVIEW-4", "previews", "must", "manual", "Every preview switch is audited"),
-    Rule("PREVIEW-5", "previews", "should", "manual", "Called \"Preview\" everywhere"),
-    Rule("CONFIG-1", "accounts", "must", "manual", "Changeable values are listed with bounds"),
-    Rule("CONFIG-2", "accounts", "must", "manual", "Bounds enforced on the server, copies tested"),
-    Rule("CONFIG-3", "accounts", "must", "manual", "A bad stored value falls back to the default"),
-    Rule("CONFIG-4", "accounts", "must", "manual", "Every change audited, full history shown"),
-    Rule("CONFIG-5", "accounts", "must", "manual", "New keys are secret until listed as readable"),
-    Rule("CONFIG-6", "accounts", "should", "manual", "An off switch for each outside service"),
-    Rule("CONFIG-7", "accounts", "should", "manual", "The page says when a change takes effect"),
-    Rule("CONFIG-8", "public+accounts", "must", "manual", "Retention settings only shorten the policy"),
 ]
 
 # The version of the standard that added each rule, for `--to-judge --since` (what a steward judges after an
 # update). A test keeps it complete: a new rule goes under the version that adds it.
 RULE_SINCE: Dict[str, str] = {
     "0.1": (
-        "REPO-1 REPO-2 REPO-3 REPO-4 REPO-5 REPO-6 REPO-7 REPO-8 AGENT-1 AGENT-2 AGENT-3 AGENT-4 AGENT-5 CI-1 "
-        "CI-2 CI-3 CI-4 CI-5 CI-6 CI-7 CI-8 CI-9 CI-10 DEP-1 DEP-2 DEP-3 DEP-4 DEP-5 DEP-6 TEST-1 TEST-2 "
-        "TEST-3 TEST-4 TEST-5 TEST-6 SEC-1 SEC-2 SEC-3 SEC-4 SEC-5 WORK-1 WORK-2 WORK-3 WORK-4 LOG-1 LOG-2 "
-        "LOG-3 LOG-4 LOG-5 LAYOUT-1 LAYOUT-2 LAYOUT-3 LAYOUT-4 OPS-1 OPS-2 OPS-3 OPS-4 OPS-5 OPS-6 LANE-1 "
-        "LANE-2 LANE-3 LANE-4 LANE-5 LANE-6 LANE-7 LANE-8 LANE-9 LANE-10 LANE-11 DATA-1 DATA-2 DATA-3 DATA-4 "
-        "DATA-5 DATA-6 DATA-7 CLOUD-1 CLOUD-2 CLOUD-3 UI-1 UI-2 UI-3 UI-4 MOBILE-1 MOBILE-2 MOBILE-3 MOBILE-4 "
-        "A11Y-1 A11Y-2 A11Y-3 A11Y-4 A11Y-5 A11Y-6 I18N-1 I18N-2"
+        "REPO-1 REPO-2 REPO-3 REPO-5 REPO-8 AGENT-1 AGENT-2 CI-1 "
+        "CI-2 CI-3 CI-4 CI-5 CI-7 CI-8 CI-10 DEP-1 DEP-2 DEP-3 DEP-5 TEST-1 TEST-2 "
+        "TEST-3 TEST-4 SEC-1 WORK-4 "
+        "LOG-3 LAYOUT-1 LAYOUT-2 LAYOUT-3 LAYOUT-4 OPS-1 OPS-6 LANE-1 "
+        "LANE-3 LANE-4 LANE-5 LANE-11 DATA-1 "
+        "DATA-6 DATA-7 UI-1 UI-2 UI-3 MOBILE-1 MOBILE-3 "
+        "A11Y-2 A11Y-3 I18N-1"
     ),
     "0.2": (
-        "VER-1 VER-2 VER-3 VER-4 VER-5 UPD-2 UPD-3 UPD-4 UPD-5 UPD-6 UPD-8 BKP-1 BKP-2 BKP-3 BKP-4 BKP-5 "
-        "BKP-6 BKP-7 BKP-8 BKP-9 BKP-10 AUTH-1 AUTH-2 AUTH-3 AUTH-4 AUTH-5 AUTH-6 AUTH-7 AUTH-8 AUTH-9 "
-        "AUTH-10 ROLE-1 ROLE-2 ROLE-3 ROLE-4 ROLE-5 ROLE-6 ROLE-7 ROLE-8 ROLE-9 SILO-1 SILO-2 SILO-3 SILO-4 "
-        "SILO-5 SILO-6 SILO-7 SILO-8 AUDIT-1 AUDIT-2 AUDIT-3 AUDIT-4 AUDIT-5 AUDIT-6 ADMIN-1 ADMIN-2 ADMIN-3 "
-        "ADMIN-4 RLS-1 RLS-2 RLS-3 RLS-4 RLS-5 RLS-6 RLS-7 MOBILE-5 MOBILE-6 MOBILE-7 MOBILE-8 APP-1 APP-2 "
-        "APP-3 APP-4 APP-5 HELP-1 HELP-2 HELP-3 HELP-4 HELP-5 PUB-1 PUB-7 PUB-2 PUB-3 PUB-4 PUB-5 PUB-6 "
-        "LEGAL-1 LEGAL-2 LEGAL-3 LEGAL-4 LEGAL-5 LEGAL-6 LEGAL-7 CONSENT-1 CONSENT-2 CONSENT-3 CONSENT-4 "
-        "CONSENT-5 RET-1 RET-2 RET-3 RET-4 RET-5 RET-6 RET-7 DEMO-1 DEMO-2 DEMO-3 DEMO-4 DEMO-5 DEMO-6 DAST-1 "
-        "DAST-2 DAST-3 DAST-4 DAST-5 DAST-6 DAST-7 DAST-8 DAST-9 LAYOUT-5"
+        "VER-1 "
+        ""
+        ""
+        ""
+        "MOBILE-5 MOBILE-6 MOBILE-7 APP-1 "
+        "PUB-1 "
+        ""
+        ""
+        "LAYOUT-5"
     ),
     "0.3": (
-        "CONST-1 CONST-2 CONST-3 CONST-4 INVITE-1 INVITE-2 INVITE-3 INVITE-4 INVITE-5 INVITE-6 INVITE-7 "
-        "INVITE-8 USERS-1 USERS-2 USERS-3 USERS-4 USERS-5 NOTIFY-1 NOTIFY-2 NOTIFY-3 NOTIFY-4 NOTIFY-5 "
-        "NOTIFY-6 NOTIFY-7 NOTIFY-8 LIC-1 LIC-2 LIC-3 LIC-4 LIC-5 LIC-6 PREVIEW-1 PREVIEW-2 PREVIEW-3 "
-        "PREVIEW-4 PREVIEW-5 CONFIG-1 CONFIG-2 CONFIG-3 CONFIG-4 CONFIG-5 CONFIG-6 CONFIG-7 CONFIG-8"
+        ""
+        ""
+        ""
+        ""
     ),
     "0.4": (
-        "A11Y-7"
+        ""
     ),
     "0.5": (
         "LAYOUT-6"
     ),
     "0.6": (
-        "NET-1 NET-2 NET-3 NET-4 NET-5 TMP-1 TMP-2 TMP-3 TMP-4 TMP-5 TMP-6 WORK-5 WORK-6 WORK-7 WORK-8"
+        "NET-4 TMP-2 TMP-5"
     ),
     "0.7": (
-        "MOBILE-9 MOBILE-10 MOBILE-11 MOBILE-12 DATA-8 DATA-9 SILO-9 CI-11"
+        "MOBILE-10"
     ),
     "1.0": (
-        "REPO-9 AGENT-6"
+        ""
+    ),
+    "1.1": (
+        "TEST-7 TEST-8"
     ),
 }
 
@@ -2111,11 +1965,7 @@ def load_held(path: Path) -> List[str]:
 
 def evaluate(repo: Repo, baseline: Dict[str, int]) -> List[Finding]:
     excepted, _ = read_exceptions(repo)
-    attested = {
-        entry["rule"]: entry
-        for entry in repo.record.get("attested", [])
-        if isinstance(entry, dict) and isinstance(entry.get("rule"), str)
-    } if isinstance(repo.record.get("attested", []), list) else {}
+    excepted.pop("__stale__", None)
 
     findings = []
     if not repo.in_scope:
@@ -2124,35 +1974,33 @@ def evaluate(repo: Repo, baseline: Dict[str, int]) -> List[Finding]:
     for rule in RULES:
         if rule.older and repo.record.get("predates_standard") is True:
             rule = replace(rule, level=rule.older)
+        if not rule.blocks and repo.writers == "one":
+            rule = replace(rule, blocks=True)  # the file is Claude's here, so whoever sees the failure can fix it
         if not applies_to(rule, repo):
             findings.append(Finding(rule, "na", "does not apply"))
             continue
-        if rule.kind == "manual" or rule.check is None:
-            entry = attested.get(rule.id)
-            if entry and entry.get("result") in ("pass", "fail"):
-                note = f"attested by {entry.get('by', '?')} on {entry.get('date', '?')}"
-                finding = Finding(rule, entry["result"], note)
-            else:
-                finding = Finding(rule, "manual", "not assessed")
+        if repo.category == "tools" and rule.id not in TOOLS_RULES:
+            findings.append(Finding(rule, "na", "a tools repository: not asked"))
+            continue
+        assert rule.check is not None  # every rule is the checker's since standard 3.0
+        result = rule.check(repo)
+        if result.status == "count":
+            allowed = baseline.get(rule.id, 0)
+            count = result.count or 0
+            status = "pass" if count <= allowed else "fail"
+            note = f"count {count}, allowed {allowed}"
+            if result.detail:
+                note += f" ({result.detail})"
+            finding = Finding(rule, status, note, count, allowed)
         else:
-            result = rule.check(repo)
-            if result.status == "count":
-                allowed = baseline.get(rule.id, 0)
-                count = result.count or 0
-                status = "pass" if count <= allowed else "fail"
-                note = f"count {count}, allowed {allowed}"
-                if result.detail:
-                    note += f" ({result.detail})"
-                finding = Finding(rule, status, note, count, allowed)
-            else:
-                finding = Finding(rule, result.status, result.detail)
+            finding = Finding(rule, result.status, result.detail)
         if finding.status == "fail" and rule.id in excepted:
             finding = Finding(rule, "excepted", excepted[rule.id], finding.count, finding.allowed)
         findings.append(finding)
     return findings
 
 
-def summarise(findings: List[Finding]) -> Dict[str, Optional[int]]:
+def summarise(findings: List[Finding]) -> Dict[str, Any]:
     musts = [f for f in findings if f.rule.level == "must" and f.status != "na"]
     passed = sum(1 for f in musts if f.status == "pass")
     failed = sum(1 for f in musts if f.status == "fail")
@@ -2161,7 +2009,7 @@ def summarise(findings: List[Finding]) -> Dict[str, Optional[int]]:
         "must_pass": passed,
         "must_fail": failed,
         "must_excepted": sum(1 for f in musts if f.status == "excepted"),
-        "must_not_assessed": sum(1 for f in musts if f.status == "manual"),
+        "must_applying": len(musts),
         "should_fail": sum(1 for f in findings if f.rule.level == "should" and f.status == "fail"),
         "score": round(100 * passed / scored) if scored else None,
     }
@@ -2170,7 +2018,7 @@ def summarise(findings: List[Finding]) -> Dict[str, Optional[int]]:
 # --------------------------------------------------------------------------
 # Output
 
-MARK = {"pass": "pass", "fail": "FAIL", "manual": "not assessed", "excepted": "excepted", "na": "n/a"}
+MARK = {"pass": "pass", "fail": "FAIL", "excepted": "excepted", "na": "n/a"}
 
 
 def as_json(repo: Repo, findings: List[Finding]) -> str:
@@ -2201,18 +2049,18 @@ def as_json(repo: Repo, findings: List[Finding]) -> str:
 
 def as_text(repo: Repo, findings: List[Finding]) -> str:
     lines = [f"Standard {STANDARD_VERSION}: layers {', '.join(repo.layers)}; back end {repo.back_end}"]
-    for status, heading in (("fail", "Failed"), ("excepted", "Excepted"), ("manual", "Not assessed (manual)")):
+    for status, heading in (("fail", "Failed"), ("excepted", "Excepted")):
         chosen = [f for f in findings if f.status == status]
         if not chosen:
             continue
         lines.append(f"\n{heading}:")
         for f in chosen:
-            lines.append(f"  {f.rule.id:<9} {f.rule.level:<6} {f.rule.title}" + (f": {f.detail}" if status != "manual" else ""))
+            lines.append(f"  {f.rule.id:<9} {f.rule.level:<6} {f.rule.title}: {f.detail}")
     summary = summarise(findings)
     score = "no scored rules" if summary["score"] is None else f"{summary['score']}%"
     lines.append(
         f"\nMust rules: {summary['must_pass']} passed, {summary['must_fail']} failed, "
-        f"{summary['must_excepted']} excepted, {summary['must_not_assessed']} not assessed. "
+        f"{summary['must_excepted']} excepted, of {summary['must_applying']} that apply. "
         f"Should rules failed: {summary['should_fail']}. Score: {score}."
     )
     return "\n".join(lines)
@@ -2226,7 +2074,7 @@ def as_markdown(repo: Repo, findings: List[Finding]) -> str:
         f"Record: {'present' if repo.record_error is None else 'none, defaults used'}.",
         "",
         f"**Score: {score}** ({summary['must_pass']} of {(summary['must_pass'] or 0) + (summary['must_fail'] or 0)} "
-        f"scored must rules pass; {summary['must_not_assessed']} manual rules not assessed; "
+        f"scored must rules pass, {summary['must_excepted']} excepted, of {summary['must_applying']} that apply; "
         f"{summary['should_fail']} should rules failed).",
         "",
         "| ID | Level | Check | Result | Detail |",
@@ -2245,6 +2093,9 @@ def as_markdown(repo: Repo, findings: List[Finding]) -> str:
 
 
 def lane_guard(repo: Repo, revision: str) -> int:
+    if not (repo.is_web and repo.writers == "two"):
+        print("lane guard: one writer here (the record's `writers`), so there is no lane to guard")
+        return 0
     commits = builder_commits(repo, [revision])
     if commits is None:
         print(
@@ -2255,6 +2106,14 @@ def lane_guard(repo: Repo, revision: str) -> int:
         return 2
     strays = out_of_lane(repo, commits)
     overridden = out_of_lane(repo, commits, "override")
+    for sha, files in commits:
+        excuse = repo.lane_excuse(sha)
+        if excuse and any(repo.builder_lane(path) in ("closed", "override") for path in files):
+            print(f"lane guard: skipped {sha}: excused by {excuse['approved_by']} on {excuse['date']}: {excuse['reason']}")
+    ignored = repo.lane_excuse_entries()[1]
+    if ignored:
+        print(f"lane guard: {ignored} entries of lane_guard.allow_commits do not count: each needs commit (7 or more "
+              "hex characters), reason, approved_by and date")
     if overridden:
         print("lane guard: the UI builder changed files it may change only on the owner's override:")
         for sha, path in overridden:
@@ -2295,25 +2154,6 @@ def rule_since(rule_id: str) -> Optional[str]:
         if rule_id in ids.split():
             return version
     return None
-
-
-def to_judge(repo: Repo, since: Optional[str]) -> int:
-    """List the manual rules that apply here and have no recorded result; with `since`, only those added after it."""
-    findings = evaluate(repo, {})
-    waiting = [
-        f for f in findings
-        if f.status == "manual"
-        and (since is None or _version_key(rule_since(f.rule.id) or "0") > _version_key(since))
-    ]
-    scope = f"added after standard {since}" if since else "in all"
-    if not waiting:
-        print(f"Nothing to judge ({scope}).")
-        return 0
-    print(f"{len(waiting)} manual rules to judge ({scope}). Record each with:")
-    print('  python3 scripts/standard_check.py --attest RULE pass|fail "evidence: file and line, a test, or a document" --by NAME')
-    for f in waiting:
-        print(f"  {f.rule.id:10} {f.rule.level:6} {f.rule.title}  [since {rule_since(f.rule.id) or '?'}]")
-    return 0
 
 
 def _json_span(text: str, start: int) -> int:
@@ -2388,24 +2228,6 @@ def _record_entry(record_path: Path, field: str, rule_id: str, entry: Dict[str, 
     return 0
 
 
-
-
-def attest(record_path: Path, rule_id: str, result: str, evidence: str, by: str) -> int:
-    """Record a manual rule's result in standard.json, changing only that entry's text (the rest keeps its layout)."""
-    if rule_id not in {rule.id for rule in RULES}:
-        print(f"unknown rule: {rule_id}", file=sys.stderr)
-        return 2
-    if result not in ("pass", "fail"):
-        print(f"the result is pass or fail, not {result}", file=sys.stderr)
-        return 2
-    if not evidence.strip() or not by.strip():
-        print("evidence and --by are required: a result without them cannot be checked", file=sys.stderr)
-        return 2
-    entry = {"rule": rule_id, "result": result, "by": by, "date": datetime.date.today().isoformat(), "evidence": evidence}
-    if _record_entry(record_path, "attested", rule_id, entry):
-        return 2
-    print(f"recorded {rule_id} {result} by {by} in {record_path.name}")
-    return 0
 
 
 def waive(record_path: Path, rule_id: str, reason: str, approved_by: str, date: str) -> int:
@@ -2593,13 +2415,6 @@ def run(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--browser-report", metavar="FILE", help="judge a Playwright JSON report by the project's mode")
     parser.add_argument("--outbound-report", metavar="FILE", help="list unlisted hosts the browser tests contacted (NET-5)")
     parser.add_argument("--weight-report", metavar="FILE", help="list the heaviest screens the browser tests loaded (MOBILE-12)")
-    parser.add_argument("--to-judge", action="store_true", help="list the manual rules here that have no recorded result")
-    parser.add_argument("--since", metavar="VERSION", help="with --to-judge: only rules added after this standard version")
-    parser.add_argument(
-        "--attest", nargs=3, metavar=("RULE", "RESULT", "EVIDENCE"),
-        help="record a manual rule's result (pass or fail) and its evidence in standard.json, changing nothing else",
-    )
-    parser.add_argument("--by", help="with --attest: who judged it")
     parser.add_argument(
         "--waive", nargs=2, metavar=("RULE", "REASON"),
         help="record the owner's waiver of a rule under exceptions in standard.json, changing nothing else",
@@ -2623,15 +2438,10 @@ def run(argv: Optional[List[str]] = None) -> int:
         print(f"cannot read the record {args.record}: {error}", file=sys.stderr)
         return 2
 
-    if args.attest:
-        rule_id, result, evidence = args.attest
-        return attest(Path(args.record) if args.record else root / "standard.json", rule_id, result, evidence, args.by or "")
     if args.waive:
         rule_id, reason = args.waive
         return waive(Path(args.record) if args.record else root / "standard.json", rule_id, reason,
                      args.approved_by or "", args.date or "")
-    if args.to_judge:
-        return to_judge(repo, args.since)
     if args.lane_guard:
         return lane_guard(repo, args.lane_guard)
     if args.files:
@@ -2639,7 +2449,7 @@ def run(argv: Optional[List[str]] = None) -> int:
         screens = lanes.get("builder", []) + lanes.get("builder_tests", [])
         closed = lanes.get("shared", []) + lanes.get("server", [])
         for name in repo.files:
-            builders = repo.is_web and matches_any(name, screens) and not matches_any(name, closed)
+            builders = repo.is_web and repo.writers == "two" and matches_any(name, screens) and not matches_any(name, closed)
             if builders == (args.files == "builder"):
                 print(name)
         return 0

@@ -4,9 +4,11 @@
     python3 scripts/dep_merge.py            in CI, every few hours (.github/workflows/dependency-merge.yml)
     python3 scripts/dep_merge.py --dry-run  say what it would merge
 
-It does nothing unless the record allows it: `"dependency_automerge": {"approved_by": NAME, "date": DAY}` in
-standard.json, the owner's standing go-ahead for dependency updates in this project (DEP-4). Then it merges each open
-pull request from Dependabot into the default branch when all of these hold:
+It runs where the record allows it: `"dependency_automerge": {"approved_by": NAME, "date": DAY}` in standard.json,
+the owner's standing go-ahead for dependency updates in this project, or by default in a repository whose `category`
+is `tools` or `private-lan` (DEP-4 since standard 2.0, the owner's decision of 2026-10-29; `"dependency_automerge":
+false` switches it off there). Then it merges each open pull request from Dependabot into the default branch when all
+of these hold:
 
 - it is at least 24 hours old, so the version it brings is too (DEP-3: nothing younger than a day is installed);
 - every check on its head finished and passed, and there is at least one;
@@ -50,12 +52,25 @@ def github_api(method: str, path: str, body: Optional[Dict[str, Any]] = None) ->
         return json.loads(response.read().decode() or "null")
 
 
+DEFAULT_CATEGORIES = ("tools", "private-lan")  # DEP-4 (2.0): on by default here, unless the record says false
+
+
 def allowed(record: Dict[str, Any]) -> Optional[str]:
-    """Who allowed it and when, or None when the record does not say so."""
+    """Who allowed it and when, or None when neither the record nor the category's default allows it."""
     entry = record.get("dependency_automerge")
+    if entry is False:
+        return None
     if isinstance(entry, dict) and str(entry.get("approved_by", "")).strip() and str(entry.get("date", "")).strip():
         return f"{entry['approved_by']} on {entry['date']}"
+    if entry is None and record.get("category") in DEFAULT_CATEGORIES:
+        return f"the standard's default for the category {record['category']} (DEP-4, standard 2.0)"
     return None
+
+
+def majors_allowed(record: Dict[str, Any]) -> bool:
+    """False only when the record's entry says `"majors": false`: a major version then waits for a person."""
+    entry = record.get("dependency_automerge")
+    return not (isinstance(entry, dict) and entry.get("majors") is False)
 
 
 def is_major(title: str) -> bool:
@@ -124,13 +139,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     who = allowed(record)
     if not who:
         print("Dependency pull requests are not merged by themselves here: standard.json has no "
-              "dependency_automerge with approved_by and date (the owner's go-ahead).")
+              "dependency_automerge with approved_by and date (the owner's go-ahead), and the category is not "
+              "tools or private-lan, where the standard switches it on by default (DEP-4).")
         return 0
     repo = os.environ.get("GITHUB_REPOSITORY")
     if not repo or not os.environ.get("GITHUB_TOKEN"):
         sys.exit("dep_merge: needs GITHUB_REPOSITORY and GITHUB_TOKEN")
     print(f"Dependency pull requests merge by themselves here (allowed by {who}).")
-    majors = record["dependency_automerge"].get("majors", True) is not False
+    majors = majors_allowed(record)
     now = datetime.datetime.now(datetime.timezone.utc)
     for line in run(github_api, repo, now, args.dry_run, majors) or ["none open"]:
         print(line)
