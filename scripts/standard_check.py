@@ -1023,7 +1023,25 @@ def _manifest_dirs(repo: Repo) -> Dict[str, str]:
             found[folder] = "js"
         elif base == "pyproject.toml" and re.search(r"(?m)^\s*dependencies\s*=", repo.read(name)):
             found.setdefault(folder, "py")
+        elif re.fullmatch(r"requirements[^/]*\.txt", base):
+            found.setdefault(folder, "py")  # a project that keeps its dependencies in requirements files (realmsculpt, #57)
     return found
+
+
+REQUIREMENT_LINE = re.compile(r"^\s*(-r|-c|--|#|$)")
+
+
+def pinned_requirements(repo: Repo, prefix: str) -> Tuple[List[str], List[str]]:
+    """(requirements files whose every requirement is pinned `==`, the others) under `prefix`. A range is not a lock."""
+    pinned: List[str] = []
+    loose: List[str] = []
+    for name in repo.files:
+        if not re.match(re.escape(prefix) + r"requirements[^/]*\.txt\Z", name):
+            continue
+        lines = [l.split("#")[0].strip() for l in repo.read(name).splitlines()]
+        lines = [l for l in lines if l and not REQUIREMENT_LINE.match(l)]
+        (pinned if lines and all(re.search(r"==", l) for l in lines) else loose).append(name)
+    return pinned, loose
 
 
 def dep_1(repo: Repo) -> Result:
@@ -1041,18 +1059,27 @@ def dep_1(repo: Repo) -> Result:
                 problems.append(f"{prefix or './'} has lockfiles of {', '.join(sorted(managers))}")
         else:
             locks = [lock for lock in PY_LOCKFILES if repo.has(prefix + lock)]
-            pinned = [n for n in repo.files if re.match(re.escape(prefix) + r"requirements[^/]*\.txt\Z", n)]
+            pinned, loose = pinned_requirements(repo, prefix)
             if not locks and not pinned:
-                problems.append(f"{prefix}pyproject.toml has no lockfile")
+                what = ", ".join(loose) + " pins no exact versions (ranges are not a lock)" if loose else f"{prefix}pyproject.toml has no lockfile"
+                problems.append(what)
     return bad("; ".join(problems)) if problems else ok()
 
 
 def dep_2(repo: Repo) -> Result:
-    if not _manifest_dirs(repo):
+    manifests = _manifest_dirs(repo)
+    if not manifests:
         return na("no dependency manifest")
-    if FROZEN_INSTALL.search(repo.check_text()):
+    text = repo.check_text()
+    if FROZEN_INSTALL.search(text):
         return ok()
-    return bad("CI does not install from the lockfile with a frozen or locked flag")
+    # pip installs from a requirements file that pins every version: that file is the lockfile.
+    pinned = [n for folder in manifests for n in pinned_requirements(repo, f"{folder}/" if folder else "")[0]]
+    for name in pinned:
+        base = name.rpartition("/")[2]
+        if re.search(r"\bpip3? (?:install|sync)\b[^\n]*-r\s+\S*" + re.escape(base), text) or re.search(r"\buv pip sync\b[^\n]*" + re.escape(base), text):
+            return ok(f"installs from {name}")
+    return bad("CI does not install from the lockfile with a frozen or locked flag (or pip -r a fully pinned requirements file)")
 
 
 def dep_3(repo: Repo) -> Result:
@@ -2568,17 +2595,28 @@ def run(argv: Optional[List[str]] = None) -> int:
         except (OSError, ValueError, KeyError, TypeError) as error:
             print(f"cannot read {baseline_path}: {error}", file=sys.stderr)
             return 2
+        findings_now = evaluate(repo, {})
         added = {
             f.rule.id: f.count
-            for f in evaluate(repo, {})
+            for f in findings_now
             if f.rule.kind == "ratchet" and f.count is not None and f.rule.id not in held
         }
         if added:
             held.update(added)
-        if added or stored.get("standard_version") != STANDARD_VERSION:
+        # A rule the checker decides that fails today and was not held: a newer checker judges something it did not
+        # before (requirements files, 3.1.1). The change under test did not cause it, so it is held, as on adoption.
+        already = stored.get("held", []) if isinstance(stored.get("held"), list) else []
+        newly = sorted(
+            f.rule.id for f in evaluate(repo, dict(held))
+            if f.rule.kind == "auto" and f.rule.level == "must" and f.status == "fail" and f.rule.blocks and f.rule.id not in already
+        )
+        if newly:
+            stored["held"] = sorted(set(already) | set(newly))
+        if added or newly or stored.get("standard_version") != STANDARD_VERSION:
             stored["standard_version"] = STANDARD_VERSION  # the baseline now holds this version's counts
             baseline_path.write_text(json.dumps(stored, indent=2) + "\n", encoding="utf-8")
-        print("added to the baseline: " + (", ".join(f"{rule} {count}" for rule, count in sorted(added.items())) or "nothing"))
+        print("added to the baseline: " + (", ".join(f"{rule} {count}" for rule, count in sorted(added.items())) or "nothing")
+              + ("; held (reported, not blocking): " + ", ".join(newly) if newly else ""))
         return 0
     if args.write_baseline:
         counts = {

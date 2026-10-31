@@ -36,7 +36,10 @@ PUSH_HOOK = f"""#!/bin/sh
 {HOOK_MARK}: the quick checks before every push, so a failure costs seconds here and not a CI round trip
 cd "$(git rev-parse --show-toplevel)" || exit 1
 check=$(python3 -c 'import json; print(json.load(open("standard.json")).get("check_command") or "scripts/check.sh")' 2>/dev/null || echo scripts/check.sh)
-if ! sh -c "$check --quick"; then
+# A check command that knows --quick runs the quick checks; one that does not (a project's own, written before
+# kit v2.0.0) runs everything, which is slower and still right (realmsculpt, 2026-10-30).
+if [ -f "${{check%% *}}" ] && grep -q -- '--quick' "${{check%% *}}"; then check="$check --quick"; fi
+if ! sh -c "$check"; then
   echo "pre-push: the quick checks failed; nothing was pushed (git push --no-verify pushes anyway: say so)" >&2
   exit 1
 fi
