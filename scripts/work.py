@@ -189,7 +189,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return start(args.number, args.name, args.repo)
         if args.step == "read":
             return read_issue(args.number, args.repo)
-        return friction(args.text, args.repo)
+        parser.error(f"unknown step {args.step}")
     except RuntimeError as error:
         print(error, file=sys.stderr)
         return 2

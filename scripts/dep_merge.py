@@ -136,6 +136,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     record_path = Path(args.repo) / "standard.json"
     record = json.loads(record_path.read_text(encoding="utf-8")) if record_path.is_file() else {}
+    if "category" not in record:  # a tools repository keeps no record (standard 3.0): Copier's answers name its category
+        answers = Path(args.repo) / ".copier-answers.yml"
+        found = re.search(r"(?m)^category:\s*(\S+)\s*$", answers.read_text(encoding="utf-8")) if answers.is_file() else None
+        if found:
+            record["category"] = found.group(1)
     who = allowed(record)
     if not who:
         print("Dependency pull requests are not merged by themselves here: standard.json has no "
