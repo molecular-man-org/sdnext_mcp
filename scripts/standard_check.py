@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-STANDARD_VERSION = "3.1"
+STANDARD_VERSION = "3.2"
 RECORD_NAME = "standard.json"
 BASELINE_NAME = "standard-baseline.json"
 MAX_READ_BYTES = 400_000
@@ -1710,8 +1710,9 @@ def mobile_10(repo: Repo) -> Result:
     return _count_in(repo, repo.screen_files((".tsx", ".jsx")), EAGER_IMAGE)
 
 
-JOURNEY = re.compile(r"(?m)^\s*test(?:\.only)?\(\s*[\"'`]([^\"'`]*)[\"'`]")
-FULL_SUITE = re.compile(r"test\.describe(?:\.\w+)?\(\s*[\"'`][^\"'`]*@full")
+# A title ends at the quote that opened it, so an apostrophe inside double quotes does not cut it (#59).
+JOURNEY = re.compile(r"(?m)^\s*test(?:\.only)?\(\s*([\"'`])((?:\\.|(?!\1).)*)\1")
+FULL_SUITE = re.compile(r"test\.describe(?:\.\w+)?\(\s*([\"'`])(?:\\.|(?!\1).)*@full")
 SMOKE_JOURNEYS = 5
 
 
@@ -1728,7 +1729,7 @@ def test_9(repo: Repo) -> Result:
         text = repo.read(name)
         if FULL_SUITE.search(text):
             continue
-        count = sum(1 for title in JOURNEY.findall(text) if "@full" not in title)
+        count = sum(1 for _, title in JOURNEY.findall(text) if "@full" not in title)
         if count:
             journeys[name] = count
     total = sum(journeys.values())
@@ -1885,6 +1886,17 @@ def mobile_7(repo: Repo) -> Result:
     return ui_file_has(repo, "dialog.tsx", "max-h-", "height limit (max-h-)")
 
 
+def layout_7(repo: Repo) -> Result:
+    """LAYOUT-7: an app is one repository; its back end is backend/ of this one, not a repository of its own."""
+    if repo.record.get("back_end_in_repo") is True:
+        if repo.under("backend/"):
+            return ok("the back end is backend/ of this repository")
+        return bad("the record says back_end_in_repo, but there is no backend/ folder")
+    others = [name for name in repo.record.get("app_repositories", []) if isinstance(name, str)]
+    where = f" ({', '.join(others)})" if others else ""
+    return bad(f"the back end is a separate repository{where}; join it as backend/ and record back_end_in_repo")
+
+
 def layout_6(repo: Repo) -> Result:
     category = repo.record.get("category")
     if category is None:
@@ -1983,6 +1995,7 @@ RULES: List[Rule] = [
     Rule("TMP-2", "all", "must", "ratchet", "No fixed paths in /tmp", tmp_2),
     Rule("TMP-5", "all", "must", "auto", "The checks leave the checkout clean", tmp_5, older="should"),
     Rule("LAYOUT-6", "all", "should", "auto", "The category agrees with the record's facts", layout_6),
+    Rule("LAYOUT-7", "service", "should", "auto", "An app is one repository: the back end in backend/", layout_7),
     Rule("LAYOUT-5", "all", "must", "auto", "The record states exposure, accounts and phone plans", layout_5, older="should"),
 ]
 
@@ -2035,6 +2048,9 @@ RULE_SINCE: Dict[str, str] = {
     ),
     "3.1": (
         "REPO-10 TEST-9 A11Y-7"
+    ),
+    "3.2": (
+        "LAYOUT-7"
     ),
 }
 
