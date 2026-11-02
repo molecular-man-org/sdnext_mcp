@@ -35,6 +35,9 @@ exec python3 "$(git rev-parse --show-toplevel)/{{path}}" commit-msg "$1"
 PUSH_HOOK = f"""#!/bin/sh
 {HOOK_MARK}: the quick checks before every push, so a failure costs seconds here and not a CI round trip
 cd "$(git rev-parse --show-toplevel)" || exit 1
+# Git exports these to a hook; GIT_DIR overrides `git -C`, so a check that builds a scratch repository would act on
+# this one (reimbursement-filing, 2026-10-31). From here on git finds the repository by the directory, as it does by hand.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 check=$(python3 -c 'import json; print(json.load(open("standard.json")).get("check_command") or "scripts/check.sh")' 2>/dev/null || echo scripts/check.sh)
 # A check command that knows --quick runs the quick checks; one that does not (a project's own, written before
 # kit v2.0.0) runs everything, which is slower and still right (realmsculpt, 2026-10-30).
