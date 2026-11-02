@@ -15,7 +15,10 @@
       "Bash(scripts/check.sh:*)",
       "Bash(scripts/standard-checks.sh:*)",
       "Bash(python3 scripts/standard_check.py:*)",
-      "Bash(gitleaks:*)"
+      "Bash(gitleaks:*)",
+      "Bash(python3 scripts/pr_flow.py:*)",
+      "Bash(gh pr ready:*)",
+      "Bash(gh pr merge:*)"
     ],
     "deny": [
       "Read(./.env)",
