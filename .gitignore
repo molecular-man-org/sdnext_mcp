@@ -8,3 +8,7 @@ CLAUDE.local.md
 # What the kit's checks write, so they leave the checkout clean (TMP-5)
 .tools/
 __pycache__/
+
+# Agent worktrees: scratch checkouts, never committed, linted or formatted (REPO-10)
+.claude/worktrees/
+worktrees/
