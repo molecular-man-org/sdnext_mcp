@@ -18,7 +18,9 @@
       "Bash(gitleaks:*)",
       "Bash(python3 scripts/pr_flow.py:*)",
       "Bash(gh pr ready:*)",
-      "Bash(gh pr merge:*)"
+      "Bash(gh pr merge:*)",
+      "mcp__claude-code-remote__get_session",
+      "mcp__claude-code-remote__set_session_title"
     ],
     "deny": [
       "Read(./.env)",
