@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-STANDARD_VERSION = "3.2"
+STANDARD_VERSION = "3.3"
 RECORD_NAME = "standard.json"
 BASELINE_NAME = "standard-baseline.json"
 MAX_READ_BYTES = 400_000
@@ -1000,6 +1000,42 @@ def ci_10(repo: Repo) -> Result:
     return counted(sum(hits.values()), ", ".join(f"{name} {count}" for name, count in top))
 
 
+XDIST_MANIFEST = re.compile(r"(?:^|/)(?:pyproject\.toml|requirements[^/]*\.txt|uv\.lock|poetry\.lock|Pipfile(?:\.lock)?|setup\.cfg|tox\.ini)\Z")
+XDIST_CONFIG = re.compile(r"(?:^|/)(?:pyproject\.toml|pytest\.ini|tox\.ini|setup\.cfg)\Z")
+XDIST_FIXED = re.compile(r"""(?<![\w-])(?:-n|--numprocesses)(?:\s*=\s*|\s+|(?=\d))['"]?([1-9]\d*)(?!\w)""")
+XDIST_ADDOPTS_LIST = re.compile(r"""["']-n["']\s*,\s*["']?([1-9]\d*)""")
+XDIST_ENV = "PYTEST_XDIST_AUTO_NUM_WORKERS"
+
+
+def ci_14(repo: Repo) -> Result:
+    """CI-14: pytest-xdist runs `-n auto`; the runner's environment says how many, no repository does."""
+    if not any(XDIST_MANIFEST.search(n) and "pytest-xdist" in repo.read(n).lower() for n in repo.files):
+        return na("pytest-xdist is not used")
+    texts: Dict[str, str] = dict(repo.workflows())
+    script = repo.check_command_file()
+    if script:
+        texts[script] = repo.read(script)
+    texts["check_command"] = repo.check_command + "\n" + (repo.check_command_package_script() or "")
+    hits: List[str] = []
+    for name, text in sorted(texts.items()):
+        for line in re.sub(r"\\\n", " ", text).splitlines():
+            code = line.split("#")[0]
+            fixed = XDIST_FIXED.search(code)
+            if XDIST_ENV in code:
+                hits.append(f"{name}: sets {XDIST_ENV}")
+            elif "pytest" in code and fixed:
+                hits.append(f"{name}: a fixed -n {fixed.group(1)}")
+    for name in repo.files:
+        if XDIST_CONFIG.search(name) and "addopts" in repo.read(name):
+            text = re.sub(r"#.*", "", repo.read(name))
+            found = XDIST_FIXED.search(text) or XDIST_ADDOPTS_LIST.search(text)
+            if found:
+                hits.append(f"{name}: addopts with a fixed -n {found.group(1)}")
+    if hits:
+        return bad("a worker count is written in the repository (the runner sets it): " + "; ".join(hits[:4]))
+    return ok()
+
+
 def ci_8(repo: Repo) -> Result:
     missing = [
         name
@@ -1947,6 +1983,7 @@ RULES: List[Rule] = [
     Rule("CI-7", "all", "must", "auto", "Jobs name a runner from ci_runners", ci_7),
     Rule("CI-8", "all", "should", "auto", "Newer commit cancels the older run", ci_8),
     Rule("CI-10", "all", "must", "ratchet", "No job stops or borrows a process it did not start", ci_10),
+    Rule("CI-14", "all", "should", "auto", "pytest-xdist runs -n auto; the runner sets the cap", ci_14),
     Rule("DEP-1", "all", "must", "auto", "One package manager, lockfile committed", dep_1),
     Rule("DEP-2", "all", "must", "auto", "CI installs from the lockfile", dep_2),
     Rule("DEP-3", "all", "must", "auto", "Packages under 24 hours old are not installed", dep_3),
@@ -2051,6 +2088,9 @@ RULE_SINCE: Dict[str, str] = {
     ),
     "3.2": (
         "LAYOUT-7"
+    ),
+    "3.3": (
+        "CI-14"
     ),
 }
 
