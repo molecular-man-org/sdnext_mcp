@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-STANDARD_VERSION = "3.3"
+STANDARD_VERSION = "3.4"
 RECORD_NAME = "standard.json"
 BASELINE_NAME = "standard-baseline.json"
 MAX_READ_BYTES = 400_000
@@ -73,7 +73,7 @@ SOURCE_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", "
 # Files the template puts into a project. They are not the project's own code.
 TEMPLATE_OWNED = ("scripts/standard_check.py", "scripts/ci-verdict.py", "scripts/pr_flow.py", "scripts/fix_workflows.py", "scripts/fix_standard.py",
                   "scripts/vuln-scan.py", "scripts/dep_merge.py", "scripts/work.py", "scripts/automerge.py",
-                  "scripts/branch_cleanup.py", "scripts/failure_issue.py",
+                  "scripts/branch_cleanup.py", "scripts/tidy.py", "scripts/failure_issue.py",
                   "scripts/builder_refresh.py")
 # The owner's categories (2026-10-13). One per app; it sets the defaults for `exposure` and `accounts`, and the
 # last two are out of scope for this standard.
@@ -855,6 +855,15 @@ def repo_10(repo: Repo) -> Result:
     if re.search(r"(?m)^/?(\.claude/)?worktrees/?\s*$", repo.read(".gitignore")):
         return ok()
     return bad(".gitignore does not ignore .claude/worktrees/ (or worktrees/)")
+
+
+def repo_11(repo: Repo) -> Result:
+    """REPO-11: the kit's `scripts/tidy.py` is in the repository and `CLAUDE.md` names it."""
+    if not repo.has("scripts/tidy.py"):
+        return bad("scripts/tidy.py is missing (a kit update brings it)")
+    if "tidy.py" not in repo.read("CLAUDE.md"):
+        return bad("CLAUDE.md does not name scripts/tidy.py")
+    return ok()
 
 
 def repo_3(repo: Repo) -> Result:
@@ -1984,6 +1993,7 @@ RULES: List[Rule] = [
     Rule("CI-8", "all", "should", "auto", "Newer commit cancels the older run", ci_8),
     Rule("CI-10", "all", "must", "ratchet", "No job stops or borrows a process it did not start", ci_10),
     Rule("CI-14", "all", "should", "auto", "pytest-xdist runs -n auto; the runner sets the cap", ci_14),
+    Rule("REPO-11", "all", "should", "auto", "The kit's tidy.py is present and CLAUDE.md names it", repo_11),
     Rule("DEP-1", "all", "must", "auto", "One package manager, lockfile committed", dep_1),
     Rule("DEP-2", "all", "must", "auto", "CI installs from the lockfile", dep_2),
     Rule("DEP-3", "all", "must", "auto", "Packages under 24 hours old are not installed", dep_3),
@@ -2091,6 +2101,9 @@ RULE_SINCE: Dict[str, str] = {
     ),
     "3.3": (
         "CI-14"
+    ),
+    "3.4": (
+        "REPO-11"
     ),
 }
 
