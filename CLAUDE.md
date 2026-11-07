@@ -71,3 +71,8 @@ An MCP server for SD.Next (public repository).
   owner's reports count AI work only from this line (AGENT-6).
 - Merge pull requests with a merge commit, never squash or rebase. Why: CI on
   `main` reuses the pull request's verdict only for a merge commit (REPO-9).
+
+## Housekeeping
+
+- Put scratch and worktrees under the system temporary directory, one folder per session, and nowhere else; remove the folder when the run ends (TMP-7).
+- Clean up in the same run (WORK-9): remove your worktrees, run `python3 scripts/tidy.py --issues`, close the issue your merged pull request finished with a comment naming it (`Closes #N` finishes, `Refs #N` does part), and turn unpushed work into a draft pull request. Report what cleaning could not settle once, in your end-of-run report; never append leftovers to an answer about something else.
