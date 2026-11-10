@@ -1069,7 +1069,7 @@ def _manifest_dirs(repo: Repo) -> Dict[str, str]:
         elif base == "pyproject.toml" and re.search(r"(?m)^\s*dependencies\s*=", repo.read(name)):
             found.setdefault(folder, "py")
         elif re.fullmatch(r"requirements[^/]*\.txt", base):
-            found.setdefault(folder, "py")  # a project that keeps its dependencies in requirements files (realmsculpt, #57)
+            found.setdefault(folder, "py")  # a project that keeps its dependencies in requirements files (realm-weaver)
     return found
 
 
@@ -1399,10 +1399,27 @@ OUTBOUND_PACKAGES = {
 URL_IN_STRING = re.compile(r"[\"'`](?:https?|wss?)://([A-Za-z0-9.-]+)")
 COMMENT_LINE = re.compile(r"^\s*(#|//|\*|/\*|<!--)")
 NOT_OUTBOUND = re.compile(
-    r"(^|\.)(localhost|example\.(com|org|net)|[a-z0-9-]+\.(test|invalid|example|local|internal)|int\.butters\.me)$"
+    r"(^|\.)(localhost|example\.(com|org|net)|[a-z0-9-]+\.(test|invalid|example|local|internal)|int\.butters\.me)$"  # site-literal-ok: the owner's LAN domain stays built in
     r"|^127\.|^10\.|^192\.168\.|^172\.(1[6-9]|2\d|3[01])\.|^0\.0\.0\.0$"
     r"|^(www\.w3\.org|json\.schemastore\.org)$"  # XML and JSON namespaces, never fetched by the app
 )
+
+
+LAN_DOMAIN = re.compile(r"\A[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\Z")
+
+
+def lan_domains(repo: Repo) -> List[str]:
+    """The project's own home-network domains from `lan_domains` in the record; a malformed list counts as none."""
+    value = repo.record.get("lan_domains", [])
+    if not isinstance(value, list) or not all(isinstance(d, str) and LAN_DOMAIN.match(d) for d in value):
+        return []
+    return list(value)
+
+
+def not_outbound(repo: Repo, host: str) -> bool:
+    """True for a host that is not an outside service: the built-in list, or a listed `lan_domains` domain or subdomain."""
+    host = host.lower().rstrip(".")
+    return bool(NOT_OUTBOUND.search(host)) or any(host == d or host.endswith("." + d) for d in lan_domains(repo))
 
 
 def approved_outbound(repo: Repo) -> Tuple[List[str], List[str]]:
@@ -1435,7 +1452,7 @@ def outbound_hosts_in_code(repo: Repo) -> Dict[str, List[str]]:
                 host = host.lower().rstrip(".")
                 if "." not in host:
                     continue  # a placeholder in an example (`http://name:port`), never an internet address
-                if not NOT_OUTBOUND.search(host) and name not in found.setdefault(host, []):
+                if not not_outbound(repo, host) and name not in found.setdefault(host, []):
                     found[host].append(name)
     return found
 
@@ -1877,6 +1894,11 @@ def layout_5(repo: Repo) -> Result:
         problems.append("phone_apps")
     if "writers" in record and record["writers"] not in RECORD_FACTS["writers"]:
         problems.append("writers (one or two)")
+    if "lan_domains" in record and not (
+        isinstance(record["lan_domains"], list)
+        and all(isinstance(d, str) and LAN_DOMAIN.match(d) for d in record["lan_domains"])
+    ):
+        problems.append("lan_domains (a list of lowercase domain names such as home.example.lan)")
     return bad("missing or wrong in standard.json: " + ", ".join(problems)) if problems else ok()
 
 
@@ -2486,7 +2508,7 @@ def outbound_report(repo: Repo, report: Path) -> int:
         except ValueError:
             continue
         host = str(entry.get("host", "")).lower() if isinstance(entry, dict) else ""
-        if host and not NOT_OUTBOUND.search(host) and host not in seen:
+        if host and not not_outbound(repo, host) and host not in seen:
             seen[host] = str(entry.get("test", ""))
     unlisted = {h: t for h, t in seen.items() if h not in hosts and not any(h.endswith("." + a) for a in hosts)}
     if not unlisted:

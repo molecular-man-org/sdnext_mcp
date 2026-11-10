@@ -85,7 +85,7 @@ if [ -n "$prettier" ]; then
 fi
 
 command=$(python3 -c 'import json,sys; print(json.load(open("standard.json")).get("check_command","scripts/check.sh"))' 2>/dev/null || echo scripts/check.sh)
-# A check command that is a script file without its executable bit (realmsculpt's run_checks.py was) runs through
+# A check command that is a script file without its executable bit (realm-weaver's run_checks.py was) runs through
 # its interpreter rather than failing with "Permission denied".
 if [ -f "$command" ] && [ ! -x "$command" ]; then
   case "$command" in
