@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-STANDARD_VERSION = "3.4"
+STANDARD_VERSION = "3.5"
 RECORD_NAME = "standard.json"
 BASELINE_NAME = "standard-baseline.json"
 MAX_READ_BYTES = 400_000
@@ -73,7 +73,7 @@ SOURCE_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", "
 # Files the template puts into a project. They are not the project's own code.
 TEMPLATE_OWNED = ("scripts/standard_check.py", "scripts/ci-verdict.py", "scripts/pr_flow.py", "scripts/fix_workflows.py", "scripts/fix_standard.py",
                   "scripts/vuln-scan.py", "scripts/dep_merge.py", "scripts/work.py", "scripts/automerge.py",
-                  "scripts/branch_cleanup.py", "scripts/tidy.py", "scripts/failure_issue.py",
+                  "scripts/branch_cleanup.py", "scripts/tidy.py", "scripts/migration-new.py", "scripts/failure_issue.py",
                   "scripts/builder_refresh.py")
 # The owner's categories (2026-10-13). One per app; it sets the defaults for `exposure` and `accounts`, and the
 # last two are out of scope for this standard.
@@ -695,14 +695,19 @@ class Repo:
             and "node_modules/" not in name
         ]
 
-    def check_text(self) -> str:
+    def check_command_text(self) -> str:
+        """What the check command alone runs: the non-comment text of the command's file or package script and of the
+        scripts those call, not the workflows around it (CI-15, TYPE-1)."""
+        return self.check_text(workflows=False)
+
+    def check_text(self, workflows: bool = True) -> str:
         """What CI runs: the non-comment text of every workflow and of the check
         command, following the scripts and package.json scripts they call."""
-        if self._check_text is not None:
+        if workflows and self._check_text is not None:
             return self._check_text
         scripts = self.package_scripts()
         seen = set()
-        queue = [strip_comments(text) for text in self.workflows().values()]
+        queue = [strip_comments(text) for text in self.workflows().values()] if workflows else []
         entry = self.check_command_file()
         if entry:
             seen.add(entry)
@@ -729,8 +734,10 @@ class Repo:
             queue = following
             if not queue:
                 break
-        self._check_text = "\n".join(collected)
-        return self._check_text
+        text = "\n".join(collected)
+        if workflows:
+            self._check_text = text
+        return text
 
     def check_command_file(self) -> Optional[str]:
         for token in self.check_command.split():
@@ -1045,6 +1052,33 @@ def ci_14(repo: Repo) -> Result:
     return ok()
 
 
+CHECKERS = ("ruff", "black", "isort", "flake8", "pylint", "mypy", "pyright", "eslint", "prettier", "biome", "tsc",
+            "golangci-lint", "shellcheck")
+CHECKER_WORD = {name: re.compile(rf"(?<![\w./-]){re.escape(name)}(?![\w-])") for name in CHECKERS}
+
+
+def ci_15(repo: Repo) -> Result:
+    """CI-15: every linter, formatter or type checker a workflow or `.pre-commit-config.yaml` runs, the check command runs
+    too, so "it passed `scripts/check.sh`" means it passes CI (Issue #129)."""
+    workflows = repo.workflows()
+    if not workflows:
+        return na("no workflow")
+    entry = repo.check_command_file()
+    in_check = repo.check_command_text()
+    elsewhere = [strip_comments(text) for name, text in workflows.items() if name != entry]
+    for name in repo.files:
+        if name.endswith(".pre-commit-config.yaml") or name == ".pre-commit-config.yaml":
+            elsewhere.append(strip_comments(repo.read(name)))
+    elsewhere_text = "\n".join(elsewhere)
+    # A workflow line that runs the check command itself is not "elsewhere": drop those lines.
+    command = repo.check_command
+    elsewhere_text = "\n".join(line for line in elsewhere_text.splitlines() if command not in line)
+    missing = [tool for tool, word in CHECKER_WORD.items() if word.search(elsewhere_text) and not word.search(in_check)]
+    if missing:
+        return bad("CI runs but the check command does not: " + ", ".join(missing))
+    return ok()
+
+
 def ci_8(repo: Repo) -> Result:
     missing = [
         name
@@ -1256,6 +1290,35 @@ def test_3(repo: Repo) -> Result:
     return bad("; ".join(problems)) if problems else ok()
 
 
+STRICT_TS = re.compile(r'"strict"\s*:\s*true')
+STRICT_PY = re.compile(r"(?im)^\s*strict\s*=\s*true\b|typeCheckingMode\"?\s*[:=]\s*\"strict\"")
+PY_TYPE_CONFIG = re.compile(r"\[tool\.(?:mypy|pyright)\]|(?m:^\[mypy)")
+
+
+def type_1(repo: Repo) -> Result:
+    """TYPE-1: the type checker TEST-3 asks for is strict AND the check command runs it (Issue #71). TEST-3 alone
+    passes on a configuration file nothing runs."""
+    sources = repo.source_files()
+    has_ts = sum(name.endswith((".ts", ".tsx")) for name in sources) >= TYPED_LANGUAGE_FILES
+    has_py = sum(name.endswith(".py") for name in sources) >= TYPED_LANGUAGE_FILES
+    if not has_ts and not has_py:
+        return na("too little TypeScript or Python to judge")
+    text = repo.check_text()
+    problems = []
+    if has_ts:
+        configs = [n for n in repo.files if re.match(r"(.*/)?tsconfig[^/]*\.json\Z", n) and "node_modules/" not in n]
+        if any(STRICT_TS.search(repo.read(n)) for n in configs) and not re.search(r"\btsc\b|\btypecheck\b|\btype-check\b", text):
+            problems.append("a strict tsconfig, but CI never runs tsc")
+    if has_py:
+        configured = [n for n in repo.files if n.endswith(("pyproject.toml", "mypy.ini", "setup.cfg"))
+                      and PY_TYPE_CONFIG.search(repo.read(n))] + [n for n in repo.files if n.endswith("pyrightconfig.json")]
+        if configured and not re.search(r"\b(mypy|pyright)\b", text):
+            problems.append("a Python type configuration, but CI never runs mypy or pyright")
+        elif configured and not any(STRICT_PY.search(repo.read(n)) for n in configured):
+            problems.append("the Python type checker is not set to strict")
+    return bad("; ".join(problems)) if problems else ok()
+
+
 def test_4(repo: Repo) -> Result:
     if not repo.workflows():
         return bad("no workflow in .github/workflows")
@@ -1266,6 +1329,33 @@ def sec_1(repo: Repo) -> Result:
     if not repo.workflows():
         return bad("no workflow in .github/workflows")
     return ok() if SECRET_SCANNERS.search(repo.check_text()) else bad("CI runs no secret scan")
+
+
+MIGRATION_FILE = re.compile(r"(?:^|/)supabase/migrations/(\d+)_[^/]+\.sql\Z")
+
+
+def mig_1(repo: Repo) -> Result:
+    """MIG-1: Supabase migration versions are unique and real UTC times (Issue #125). Sessions typed versions by hand
+    and produced duplicates and hour 24; `scripts/migration-new.py` makes one from the clock."""
+    import datetime
+
+    versions: Dict[str, List[str]] = {}
+    for name in repo.files:
+        found = MIGRATION_FILE.search(name)
+        if found:
+            versions.setdefault(found.group(1), []).append(name)
+    if not versions:
+        return na("no Supabase migrations")
+    problems = []
+    for version, names in sorted(versions.items()):
+        if len(names) > 1:
+            problems.append(f"{version} is used by {len(names)} files")
+        if len(version) == 14:
+            try:
+                datetime.datetime.strptime(version, "%Y%m%d%H%M%S")
+            except ValueError:
+                problems.append(f"{version} is not a real date and time")
+    return bad("; ".join(problems[:4])) if problems else ok(f"{len(versions)} migrations")
 
 
 # checks: work tracking ------------------------------------------------------
@@ -2015,7 +2105,9 @@ RULES: List[Rule] = [
     Rule("CI-8", "all", "should", "auto", "Newer commit cancels the older run", ci_8),
     Rule("CI-10", "all", "must", "ratchet", "No job stops or borrows a process it did not start", ci_10),
     Rule("CI-14", "all", "should", "auto", "pytest-xdist runs -n auto; the runner sets the cap", ci_14),
+    Rule("CI-15", "all", "should", "auto", "the check command runs every lint, format and type check CI runs", ci_15),
     Rule("REPO-11", "all", "should", "auto", "The kit's tidy.py is present and CLAUDE.md names it", repo_11),
+    Rule("MIG-1", "all", "should", "auto", "Supabase migration versions are unique, real times", mig_1),
     Rule("DEP-1", "all", "must", "auto", "One package manager, lockfile committed", dep_1),
     Rule("DEP-2", "all", "must", "auto", "CI installs from the lockfile", dep_2),
     Rule("DEP-3", "all", "must", "auto", "Packages under 24 hours old are not installed", dep_3),
@@ -2024,6 +2116,7 @@ RULES: List[Rule] = [
     Rule("TEST-2", "all", "must", "auto", "A coverage floor is configured", test_2),
     Rule("TEST-3", "all", "must", "auto", "Static types are strict", test_3, older="should"),
     Rule("TEST-4", "all", "must", "auto", "Lint and format checks run in CI", test_4, older="should"),
+    Rule("TYPE-1", "all", "should", "auto", "The strict type checker is run by CI, not only configured", type_1),
     Rule("TEST-7", "web", "must", "auto", "No coverage tool wraps the browser tests", test_7, older="should"),
     Rule("TEST-8", "all", "must", "auto", "Coverage exclusions are a closed list, each with a reason", test_8, older="should"),
     Rule("TEST-9", "web", "should", "auto", "At most five browser journeys run on a pull request", test_9),
@@ -2126,6 +2219,9 @@ RULE_SINCE: Dict[str, str] = {
     ),
     "3.4": (
         "REPO-11"
+    ),
+    "3.5": (
+        "CI-15 TYPE-1 MIG-1"
     ),
 }
 
@@ -2535,6 +2631,15 @@ def browser_report(repo: Repo, report: Path, baseline_path: Path, write: bool) -
             raise ValueError("stats.unexpected is not a number")
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"browser tests: cannot read the report {report}: {error}. Nothing was judged.", file=sys.stderr)
+        return 2
+    stats = data["stats"]
+    load_errors = [e for e in data.get("errors", []) or [] if isinstance(e, dict)]
+    if not write and (load_errors or (isinstance(stats.get("expected"), int) and failing == 0
+                                      and stats["expected"] + int(stats.get("flaky") or 0) == 0)):
+        # A syntax error in a test file loads no tests; Playwright then reports 0 failing and the run was green (Issue #94).
+        reason = (f"Playwright reported a load error: {str(load_errors[0].get('message', ''))[:200]}" if load_errors
+                  else "no test passed (none ran)")
+        print(f"browser tests: {reason}. A run that tested nothing is not a pass.", file=sys.stderr)
         return 2
     names: List[str] = []
     for suite in data.get("suites", []) or []:

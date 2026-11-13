@@ -29,7 +29,7 @@ if [ "$after_update" = 0 ] && [ -z "$version" ]; then
 fi
 
 here=$(cd "$(dirname "$0")" && pwd)
-root=$(git -C "$here" rev-parse --show-toplevel) || exit 2
+root=$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git -C "$here" rev-parse --show-toplevel) || exit 2
 cd "$root" || exit 2
 
 score() { python3 "$here/standard_check.py" --repo "$root" --report-only | tail -n 1; }
@@ -49,7 +49,7 @@ if [ "$after_update" = 0 ]; then
 fi
 
 # The kit's own files: everything an update is allowed to rewrite.
-kit='^(\.copier-answers\.yml|standard-baseline\.json|scripts/(standard_check\.py|standard-checks\.sh|ci-tools\.sh|ci-verdict\.py|pr_flow\.py|fix_workflows\.py|fix_standard\.py|format-check\.sh|lint-check\.sh|lane-fix\.sh|kit-update\.sh|vuln-scan\.py|dep_merge\.py|work\.py|automerge\.py|branch_cleanup\.py|tidy\.py|failure_issue\.py|builder_refresh\.py)|docs/phone-app-decisions\.md|e2e/kit/|\.claude/(hooks|agents|skills)/|\.claude/queue\.md|\.github/workflows/(builder-(sync|cleanup)[^/]*|vuln-scan|dependency-merge|automerge|branch-cleanup|failure-issue|agent-issue|e2e-full)\.yml)'
+kit='^(\.copier-answers\.yml|standard-baseline\.json|scripts/(standard_check\.py|standard-checks\.sh|ci-tools\.sh|ci-verdict\.py|pr_flow\.py|fix_workflows\.py|fix_standard\.py|format-check\.sh|lint-check\.sh|lane-fix\.sh|kit-update\.sh|vuln-scan\.py|dep_merge\.py|work\.py|automerge\.py|branch_cleanup\.py|tidy\.py|migration-new\.py|failure_issue\.py|builder_refresh\.py)|docs/phone-app-decisions\.md|e2e/kit/|\.claude/(hooks|agents|skills)/|\.claude/queue\.md|\.github/workflows/(builder-(sync|cleanup)[^/]*|vuln-scan|dependency-merge|automerge|branch-cleanup|failure-issue|agent-issue|e2e-full)\.yml)'
 changed=$(git status --porcelain | cut -c4-)
 others=$(printf '%s\n' "$changed" | grep -v -E "$kit" | grep -v '^$' || true)
 

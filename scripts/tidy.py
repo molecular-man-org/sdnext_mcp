@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -51,6 +52,35 @@ def git_in(cwd: Optional[str]) -> Callable[..., str]:
 def default_branch(git: Callable[..., str]) -> str:
     ref = git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
     return ref.split("/", 1)[1] if ref.startswith("origin/") else "main"
+
+
+def stop_processes_in(folder: str, say: Callable[[str], None] = print) -> int:
+    """Stop the processes whose working directory is inside `folder` (a dev server a browser test started there keeps
+    running after the folder is removed: Issue #140). Linux reads /proc; elsewhere lsof. Returns how many were stopped."""
+    import signal
+
+    root = os.path.realpath(folder)
+    pids: List[int] = []
+    if os.path.isdir("/proc"):
+        for entry in os.listdir("/proc"):
+            if entry.isdigit() and int(entry) != os.getpid():
+                try:
+                    cwd = os.readlink(f"/proc/{entry}/cwd")
+                except OSError:
+                    continue
+                if cwd == root or cwd.startswith(root + os.sep):
+                    pids.append(int(entry))
+    else:
+        out = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fp", "+D", root], capture_output=True, text=True, check=False)
+        pids = [int(line[1:]) for line in out.stdout.splitlines() if line.startswith("p") and line[1:].isdigit()
+                and int(line[1:]) != os.getpid()]
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            say(f"stopped process {pid}, which was running in {folder}")
+        except OSError:
+            pass
+    return len(pids)
 
 
 def worktrees(git: Callable[..., str]) -> List[Dict[str, str]]:
@@ -116,6 +146,7 @@ def tidy(cwd: Optional[str] = None, dry_run: bool = False, say: Callable[[str], 
                 continue
             say(f"{'would remove' if dry_run else 'removed'} the worktree {tree}")
             if not dry_run:
+                stop_processes_in(tree, say)
                 git("worktree", "remove", tree)
         say(f"{'would delete' if dry_run else 'deleted'} the local branch {branch}: merged into {default}")
         if not dry_run:
