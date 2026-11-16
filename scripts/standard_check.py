@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-STANDARD_VERSION = "3.5"
+STANDARD_VERSION = "3.7"
 RECORD_NAME = "standard.json"
 BASELINE_NAME = "standard-baseline.json"
 MAX_READ_BYTES = 400_000
@@ -62,9 +62,10 @@ DEFAULT_LANES: Dict[str, List[str]] = {
 DEFAULT_BUILDER_AUTHORS = ["gpt-engineer-app[bot]", "lovable-dev[bot]", "Lovable"]
 
 # A tools repository (an MCP server, a prompt library, a personal tool) is asked only this: CI runs one check
-# command on the owner's runners, a secret scan, a lockfile that CI installs from, and Dependabot (the owner,
-# 2026-10-30, standard 3.0). Nothing else applies to it, and it needs no record.
-TOOLS_RULES = frozenset({"CI-1", "CI-2", "CI-7", "DEP-1", "DEP-2", "DEP-5", "SEC-1"})
+# command on the owner's runners, a secret scan and a lockfile that CI installs from (the owner, 2026-10-30,
+# standard 3.0; Dependabot was dropped from this list on 2026-11-16, standard 3.7). Nothing else applies to it, and
+# it needs no record.
+TOOLS_RULES = frozenset({"CI-1", "CI-2", "CI-7", "DEP-1", "DEP-2", "SEC-1"})
 # The UI builder's notes for Claude: always its own, whatever the lanes say. Designers work in the builder's editor
 # without Claude, and the builder cannot open issues, so it leaves the work for Claude here (LANE-9).
 BUILDER_NOTES = "LOVABLE-NOTES.md"
@@ -73,7 +74,7 @@ SOURCE_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", "
 # Files the template puts into a project. They are not the project's own code.
 TEMPLATE_OWNED = ("scripts/standard_check.py", "scripts/ci-verdict.py", "scripts/pr_flow.py", "scripts/fix_workflows.py", "scripts/fix_standard.py",
                   "scripts/vuln-scan.py", "scripts/dep_merge.py", "scripts/work.py", "scripts/automerge.py",
-                  "scripts/branch_cleanup.py", "scripts/tidy.py", "scripts/migration-new.py", "scripts/failure_issue.py",
+                  "scripts/branch_cleanup.py", "scripts/tidy.py", "scripts/migration-new.py", "scripts/ipad-smoke.py", "scripts/failure_issue.py",
                   "scripts/builder_refresh.py")
 # The owner's categories (2026-10-13). One per app; it sets the defaults for `exposure` and `accounts`, and the
 # last two are out of scope for this standard.
@@ -118,6 +119,16 @@ HEX_COLOUR = re.compile(
 # attribute (an arrow function) does not end the tag.
 EAGER_IMAGE = re.compile(r"<img\b(?!(?:=>|[^>])*\bloading=)(?:=>|[^>])*>")
 VIEWPORT_HEIGHT = re.compile(r"(?<![a-zA-Z0-9.])\d+vh\b|(?<![a-zA-Z0-9-])(?:min-|max-)?h-screen\b")
+# A number written where it is used, not named (CODE-1). A name is cheap and the reason lives in it: `retries = MAX_TRIES`,
+# not `retries = 3`. A constant's own definition, 0, 1, 2, 10, 100, 1000 and 0.5 are not counted.
+MAGIC_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+MAGIC_ALLOWED = {0.0, 1.0, 2.0, 10.0, 100.0, 1000.0, 0.5}
+MAGIC_NUMBER = re.compile(r"(?<![\w.])(?:\d+\.\d+|\.\d+|\d+)(?![\w.])")
+MAGIC_STRING = re.compile(r"\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`")
+MAGIC_DOCSTRING = re.compile(r"(?s)(\"\"\"|''').*?\1")
+MAGIC_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+MAGIC_CONSTANT = re.compile(r"^\s*(?:export\s+)?(?:const\s+|let\s+|var\s+)?[A-Z][A-Z0-9_]*\s*(?::[^=]+)?=(?!=)")
+MAGIC_SKIP_FILE = re.compile(r"\.d\.ts\Z|\.config\.[a-z]+\Z|(^|/)(migrations|generated)/|(^|/)src/components/ui/")
 TEST_NAME = re.compile(r"\.(test|spec)\.[a-z]+\Z|(^|/)test_[^/]+\.py\Z|_test\.(py|go)\Z")
 TEST_FOLDER = re.compile(r"(^|/)(tests?|e2e|__tests__)/")
 TEST_SUPPORT = re.compile(r"(^|/)(setup|conftest|__init__|fixtures?|helpers?)\.[a-z]+\Z")
@@ -817,6 +828,8 @@ def applies_to(rule: Rule, repo: Repo) -> bool:
         "app": lambda: repo.is_web or repo.deployed,
         "split": lambda: bool(repo.record.get("app_repositories")),
         "public": lambda: repo.exposure == "public",
+        # A commercial app: the owner's category 1, the one place Dependabot runs (DEP-5, standard 3.7).
+        "commercial": lambda: repo.category == "public-business",
         "lan": lambda: repo.exposure == "lan",
         "accounts": lambda: repo.flag("accounts"),
         # Unstated, an app with accounts is taken to have passwords and to hold data.
@@ -1843,6 +1856,36 @@ def ui_3(repo: Repo) -> Result:
     return _count_in(repo, repo.screen_files((".tsx", ".jsx")), HEX_COLOUR)
 
 
+def magic_numbers(text: str, python: bool) -> int:
+    """Numbers in `text` that are neither named nor on the allowed list. Docstrings, strings and comments are
+    removed first, so a sentence is never counted."""
+    if python:
+        text = MAGIC_DOCSTRING.sub("", text)
+    text = MAGIC_STRING.sub('""', text)
+    text = MAGIC_BLOCK_COMMENT.sub("", text)
+    total = 0
+    for line in text.splitlines():
+        line = re.sub(r"#.*" if python else r"//.*", "", line)
+        if MAGIC_CONSTANT.match(line):
+            continue
+        total += sum(1 for number in MAGIC_NUMBER.findall(line) if float(number) not in MAGIC_ALLOWED)
+    return total
+
+
+def code_1(repo: Repo) -> Result:
+    total = 0
+    worst: List[Tuple[int, str]] = []
+    for name in repo.source_files():
+        if not name.endswith(MAGIC_SUFFIXES) or MAGIC_SKIP_FILE.search(name):
+            continue
+        hits = magic_numbers(repo.read(name), name.endswith(".py"))
+        if hits:
+            total += hits
+            worst.append((hits, name))
+    worst.sort(key=lambda item: (-item[0], item[1]))
+    return counted(total, ", ".join(f"{name} {hits}" for hits, name in worst[:3]))
+
+
 def mobile_1(repo: Repo) -> Result:
     configs = [n for n in repo.files if re.search(r"(^|/)playwright[^/]*\.config\.[a-z]+\Z", n)]
     if not configs:
@@ -2111,7 +2154,7 @@ RULES: List[Rule] = [
     Rule("DEP-1", "all", "must", "auto", "One package manager, lockfile committed", dep_1),
     Rule("DEP-2", "all", "must", "auto", "CI installs from the lockfile", dep_2),
     Rule("DEP-3", "all", "must", "auto", "Packages under 24 hours old are not installed", dep_3),
-    Rule("DEP-5", "all", "must", "auto", "Automated dependency updates", dep_5, older="should"),
+    Rule("DEP-5", "commercial", "must", "auto", "Automated dependency updates", dep_5, older="should"),
     Rule("TEST-1", "all", "must", "auto", "Tests exist", test_1),
     Rule("TEST-2", "all", "must", "auto", "A coverage floor is configured", test_2),
     Rule("TEST-3", "all", "must", "auto", "Static types are strict", test_3, older="should"),
@@ -2158,6 +2201,7 @@ RULES: List[Rule] = [
     Rule("TMP-5", "all", "must", "auto", "The checks leave the checkout clean", tmp_5, older="should"),
     Rule("LAYOUT-6", "all", "should", "auto", "The category agrees with the record's facts", layout_6),
     Rule("LAYOUT-7", "service", "should", "auto", "An app is one repository: the back end in backend/", layout_7),
+    Rule("CODE-1", "all", "should", "ratchet", "No number written where it is used", code_1, blocks=False),
     Rule("LAYOUT-5", "all", "must", "auto", "The record states exposure, accounts and phone plans", layout_5, older="should"),
 ]
 
@@ -2222,6 +2266,9 @@ RULE_SINCE: Dict[str, str] = {
     ),
     "3.5": (
         "CI-15 TYPE-1 MIG-1"
+    ),
+    "3.6": (
+        "CODE-1"
     ),
 }
 
