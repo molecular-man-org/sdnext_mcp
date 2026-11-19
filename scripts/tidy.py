@@ -4,6 +4,7 @@
     python3 scripts/tidy.py              clean what is safe, report the rest
     python3 scripts/tidy.py --dry-run    say what it would do and do nothing
     python3 scripts/tidy.py --issues     also list open issues that a merged pull request mentions (needs `gh`)
+    python3 scripts/tidy.py --sessions 24    also remove the locked worktrees of Claude remote sessions idle 24 hours or more
 
 Cleans, because nothing is lost by it:
 
@@ -19,6 +20,11 @@ Reports and never touches, because it is someone's work:
 - with `--issues`, an open issue named by a merged pull request (`Refs #N`, `For #N`, `Fixes #N`) that is still open:
   a finished issue left open, or one a pull request only half did. A person or a session reads it and closes it with
   a comment saying which pull request did it; this script never closes one.
+
+With `--sessions HOURS` it also removes the worktrees a Claude remote session leaves under `.claude/worktrees/bridge-*`
+(git locks each with "claude agent ...", so `git worktree prune` and the rules above skip them; Issue #171), but only a
+worktree that is not the one it runs in, has no uncommitted changes, whose commits are all in the default branch or on
+a remote, and that nothing has touched for HOURS hours: a session still at work, or one with work only here, is kept.
 
 The default branch and the builder's branch are never deleted. Exits 0 when everything is clean or was cleaned, 1 when
 something is left that needs a decision, so a session ends its run with it. Standard library only; Python 3.9. Owned by
@@ -100,7 +106,59 @@ def is_merged(git: Callable[..., str], branch: str, base: str) -> bool:
     return not any(line.startswith("+") for line in git("cherry", base, branch).splitlines())
 
 
-def tidy(cwd: Optional[str] = None, dry_run: bool = False, say: Callable[[str], None] = print) -> int:
+SESSION_TREE = re.compile(r"/\.claude/worktrees/bridge-[^/]+$")
+
+
+def last_touched(git_dir: str) -> float:
+    """The newest change time among the files git rewrites when someone commits or switches branch in a worktree."""
+    times = [0.0]
+    for name in ("HEAD", "logs/HEAD"):  # not the index: `git status` rewrites it
+        try:
+            times.append(os.path.getmtime(os.path.join(git_dir, name)))
+        except OSError:
+            pass
+    return max(times)
+
+
+def stale_sessions(git: Callable[..., str], trees: List[Dict[str, str]], base: str, here: str, hours: float,
+                   dry_run: bool, say: Callable[[str], None], now: Optional[float] = None) -> None:
+    """Remove the locked worktrees of remote sessions that nobody has touched for `hours` and that hold no work that is
+    only there. Never the worktree this runs in (Issue #171)."""
+    import time
+
+    now = time.time() if now is None else now
+    for item in trees[1:]:
+        path = item["worktree"]
+        if not SESSION_TREE.search(path) or not item.get("locked", "").startswith("claude agent"):
+            continue
+        if os.path.realpath(path) == os.path.realpath(here):
+            continue
+        if git("-C", path, "status", "--porcelain"):
+            say(f"KEPT {path}: uncommitted changes")
+            continue
+        head = git("-C", path, "rev-parse", "HEAD")
+        branch = item.get("branch", "").replace("refs/heads/", "")
+        on_remote = bool(git("branch", "-r", "--contains", head))
+        in_base = not git("rev-list", "--max-count=1", f"{base}..{head}")
+        if not (on_remote or in_base):
+            say(f"KEPT {path}: commits that are on no remote and not in {base}")
+            continue
+        idle = (now - last_touched(os.path.join(git("-C", path, "rev-parse", "--absolute-git-dir")))) / 3600
+        if idle < hours:
+            say(f"KEPT {path}: touched {idle:.1f} hours ago, less than {hours:g}")
+            continue
+        say(f"{'would remove' if dry_run else 'removed'} the session worktree {path} (idle {idle:.0f} hours)")
+        if dry_run:
+            continue
+        git("worktree", "unlock", path)
+        stop_processes_in(path, say)
+        git("worktree", "remove", "--force", path)
+        if branch and branch not in KEEP:
+            git("branch", "-D", branch)
+
+
+def tidy(cwd: Optional[str] = None, dry_run: bool = False, say: Callable[[str], None] = print,
+         session_hours: Optional[float] = None) -> int:
     """Returns how many things are left that need a decision."""
     git = git_in(cwd)
     run(["git", "fetch", "--prune", "--quiet", "origin"], cwd)
@@ -132,6 +190,8 @@ def tidy(cwd: Optional[str] = None, dry_run: bool = False, say: Callable[[str], 
             say(f"LEFT {branch}: checked out in the main working tree; check out {default} first")
             left += 1
             continue
+        if tree and "locked" in next((w for w in trees if w["worktree"] == tree), {}):
+            continue  # git locks a session's worktree: a session may be working in it right now (Issue #171)
         if not is_merged(git, branch, base):
             ahead = git("rev-list", "--count", f"{base}..{branch}")
             remotes = git("branch", "-r", "--contains", branch)
@@ -160,6 +220,10 @@ def tidy(cwd: Optional[str] = None, dry_run: bool = False, say: Callable[[str], 
             say(f"DIRTY {item['worktree']}: uncommitted changes on {branch or 'a detached head'}")
             left += 1
 
+    if session_hours is not None:
+        stale_sessions(git, worktrees(git), base, git("rev-parse", "--show-toplevel"), session_hours, dry_run, say)
+        run(["git", "worktree", "prune"], cwd)
+
     for stash in git("stash", "list").splitlines():
         say(f"STASH {stash}")
         left += 1
@@ -183,9 +247,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--issues", action="store_true")
+    parser.add_argument("--sessions", type=float, metavar="HOURS",
+                        help="also remove locked Claude remote-session worktrees idle this many hours (Issue #171)")
     parser.add_argument("--clone", help="tidy that clone instead of the current directory")
     args = parser.parse_args()
-    left = tidy(args.clone, args.dry_run)
+    if args.sessions is not None and args.sessions <= 0:
+        parser.error("--sessions takes a positive number of hours")
+    left = tidy(args.clone, args.dry_run, session_hours=args.sessions)
     if args.issues:
         for item in mentioned_open_issues(args.clone):
             pulls = ", ".join(f"PR #{p}" for p in item["pulls"])
