@@ -42,6 +42,17 @@ else
   echo "SKIPPED: gitleaks is not installed (scripts/ci-tools.sh installs it)" >&2
 fi
 
+# A vendored copy of a contract or a shared module must equal its source (Issue #165). Nothing declared, nothing checked.
+# A copy whose source is another repository is read with gh, so a local run, which may have no network, skips those.
+if [ -f "$here/copy_sync.py" ]; then
+  echo "==> vendored copies"
+  if [ "${CI:-}" = "true" ]; then
+    python3 "$here/copy_sync.py" --repo "$root" || failed=1
+  else
+    python3 "$here/copy_sync.py" --repo "$root" --local-only || failed=1
+  fi
+fi
+
 echo "==> project standard"
 python3 "$here/standard_check.py" --repo "$root" || failed=1
 

@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-STANDARD_VERSION = "3.7"
+STANDARD_VERSION = "3.8"
 RECORD_NAME = "standard.json"
 BASELINE_NAME = "standard-baseline.json"
 MAX_READ_BYTES = 400_000
@@ -74,7 +74,7 @@ SOURCE_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", "
 # Files the template puts into a project. They are not the project's own code.
 TEMPLATE_OWNED = ("scripts/standard_check.py", "scripts/ci-verdict.py", "scripts/pr_flow.py", "scripts/fix_workflows.py", "scripts/fix_standard.py",
                   "scripts/vuln-scan.py", "scripts/dep_merge.py", "scripts/work.py", "scripts/automerge.py",
-                  "scripts/branch_cleanup.py", "scripts/tidy.py", "scripts/migration-new.py", "scripts/ipad-smoke.py", "scripts/failure_issue.py",
+                  "scripts/branch_cleanup.py", "scripts/tidy.py", "scripts/issue_count.py", "scripts/issue_hygiene.py", "scripts/copy_sync.py", "scripts/stale_checks.py", "scripts/daily_release.py", "scripts/migration-new.py", "scripts/ipad-smoke.py", "scripts/failure_issue.py",
                   "scripts/builder_refresh.py")
 # The owner's categories (2026-10-13). One per app; it sets the defaults for `exposure` and `accounts`, and the
 # last two are out of scope for this standard.
@@ -812,6 +812,7 @@ class Rule:
     check: Optional[Callable[[Repo], Result]] = None
     older: Optional[str] = None  # the level for a repository that predates the standard, when it differs
     blocks: bool = True  # False: a failure is counted and reported, and never fails the run ("What may block")
+    trial: Optional[str] = None  # a `must` new in a release: "REPOSITORY YYYY-MM-DD", where it was tried for a week first
 
 
 def applies_to(rule: Rule, repo: Repo) -> bool:
@@ -830,6 +831,8 @@ def applies_to(rule: Rule, repo: Repo) -> bool:
         "public": lambda: repo.exposure == "public",
         # A commercial app: the owner's category 1, the one place Dependabot runs (DEP-5, standard 3.7).
         "commercial": lambda: repo.category == "public-business",
+        # An internal web app: a front end on the owner's own network. It releases once a day by date (VER-7, VER-8).
+        "internal": lambda: repo.category == "private-lan" and repo.is_web,
         "lan": lambda: repo.exposure == "lan",
         "accounts": lambda: repo.flag("accounts"),
         # Unstated, an app with accounts is taken to have passwords and to hold data.
@@ -883,6 +886,15 @@ def repo_11(repo: Repo) -> Result:
         return bad("scripts/tidy.py is missing (a kit update brings it)")
     if "tidy.py" not in repo.read("CLAUDE.md"):
         return bad("CLAUDE.md does not name scripts/tidy.py")
+    return ok()
+
+
+def repo_12(repo: Repo) -> Result:
+    """REPO-12: the kit's `scripts/issue_hygiene.py` is in the repository and `CLAUDE.md` names it."""
+    if not repo.has("scripts/issue_hygiene.py"):
+        return bad("scripts/issue_hygiene.py is missing (a kit update brings it)")
+    if "issue_hygiene.py" not in repo.read("CLAUDE.md"):
+        return bad("CLAUDE.md does not name scripts/issue_hygiene.py")
     return ok()
 
 
@@ -2012,7 +2024,8 @@ def i18n_1(repo: Repo) -> Result:
 
 # checks: added in version 0.2 -------------------------------------------------
 
-VERSION_FORMAT = re.compile(r"\A20\d\d\.(?:[1-9]|1[0-2])\.(?:0|[1-9]\d*)\Z")
+# A same-day fix of an internal app adds `+N` (npm) or `.postN` (Python), as scripts/daily_release.py writes it (VER-7).
+VERSION_FORMAT = re.compile(r"\A20\d\d\.(?:[1-9]|1[0-2])\.(?:0|[1-9]\d*)(?:\+\d+|\.post\d+)?\Z")
 RECORD_FACTS = {"exposure": ("public", "lan", "none"), "phone_apps": ("none", "planned", "shipping"), "writers": ("one", "two")}
 
 
@@ -2052,6 +2065,71 @@ def ver_1(repo: Repo) -> Result:
     if not VERSION_FORMAT.match(version):
         return bad(f"{source}: {version} is not YYYY.M.N")
     return ok(f"{source}: {version}")
+
+
+DATED_HEADING = re.compile(r"(?m)^##\s+\[?v?(\d{4})\.(\d{2})\.(\d{2})(?:-(\d+))?\]?\s*$")
+CHANGELOG_HEADING = re.compile(r"(?m)^##\s+(?!\[?unreleased)(.+?)\s*$", re.I)
+
+
+def release_package_version(year: str, month: str, day: str, suffix: Optional[str], python: bool) -> str:
+    """The version a package file holds for the release `YYYY.MM.DD[-N]`: no leading zeros (npm's semver refuses them,
+    PEP 440 rewrites them); a same-day fix is `+N` for npm and `.postN` for Python. scripts/daily_release.py agrees."""
+    base = f"{int(year)}.{int(month)}.{int(day)}"
+    if not suffix:
+        return base
+    return f"{base}.post{suffix}" if python else f"{base}+{suffix}"
+
+
+def ver_5(repo: Repo) -> Result:
+    """VER-7: an internal web app's version is the date. The newest changelog section is headed `YYYY.MM.DD` (a same-day
+    fix `YYYY.MM.DD-N`) and the package file holds the same date without leading zeros (Issue #154)."""
+    if not repo.has("CHANGELOG.md"):
+        return na("no CHANGELOG.md: no release yet")
+    heading = CHANGELOG_HEADING.search(repo.read("CHANGELOG.md"))
+    if not heading:
+        return na("no release section in CHANGELOG.md yet")
+    dated = DATED_HEADING.match(heading.group(0))
+    if not dated:
+        return bad(f"the newest CHANGELOG.md heading is '{heading.group(1)}', not a date YYYY.MM.DD")
+    year, month, day, suffix = dated.groups()
+    try:
+        datetime.date(int(year), int(month), int(day))
+    except ValueError:
+        return bad(f"CHANGELOG.md: {year}.{month}.{day} is not a real date")
+    version, source, python = None, "", False
+    if repo.has("package.json"):
+        try:
+            version, source = json.loads(repo.read("package.json")).get("version"), "package.json"
+        except (ValueError, AttributeError):
+            return bad("package.json is not valid JSON")
+    elif repo.has("pyproject.toml"):
+        found = re.search(r'(?m)^version\s*=\s*"([^"]*)"', repo.read("pyproject.toml"))
+        version, source, python = (found.group(1) if found else None), "pyproject.toml", True
+    if source and version is not None:
+        expected = release_package_version(year, month, day, suffix, python)
+        if version != expected:
+            return bad(f"{source} holds {version}, the newest release {year}.{month}.{day}{'-' + suffix if suffix else ''} is {expected} there")
+    return ok(f"{year}.{month}.{day}{'-' + suffix if suffix else ''}")
+
+
+def ver_6(repo: Repo) -> Result:
+    """VER-8: an internal web app releases itself once a day, early in the morning Eastern (Issue #154)."""
+    name = ".github/workflows/daily-release.yml"
+    text = repo.workflows().get(name)
+    if text is None:
+        return bad(f"no {name}: an internal web app releases once a day (scripts/daily_release.py)")
+    if "daily_release.py" not in text:
+        return bad(f"{name} does not run scripts/daily_release.py")
+    hours = []
+    for cron in re.findall(r'(?m)^\s*-\s*cron:\s*["\']([^"\']+)["\']', text):
+        fields = cron.split()
+        if len(fields) == 5 and fields[1].isdigit() and fields[2] == "*" and fields[4] == "*":
+            hours.append(int(fields[1]))
+    if not hours:
+        return bad(f"{name} has no daily schedule (a cron entry with a fixed hour, every day)")
+    if not any(9 <= hour <= 12 for hour in hours):
+        return bad(f"{name} runs at {hours[0]}:00 UTC; early morning Eastern is 9 to 12 UTC")
+    return ok()
 
 
 def pub_1(repo: Repo) -> Result:
@@ -2150,6 +2228,7 @@ RULES: List[Rule] = [
     Rule("CI-14", "all", "should", "auto", "pytest-xdist runs -n auto; the runner sets the cap", ci_14),
     Rule("CI-15", "all", "should", "auto", "the check command runs every lint, format and type check CI runs", ci_15),
     Rule("REPO-11", "all", "should", "auto", "The kit's tidy.py is present and CLAUDE.md names it", repo_11),
+    Rule("REPO-12", "all", "should", "auto", "The kit's issue_hygiene.py is present and CLAUDE.md names it", repo_12),
     Rule("MIG-1", "all", "should", "auto", "Supabase migration versions are unique, real times", mig_1),
     Rule("DEP-1", "all", "must", "auto", "One package manager, lockfile committed", dep_1),
     Rule("DEP-2", "all", "must", "auto", "CI installs from the lockfile", dep_2),
@@ -2190,6 +2269,8 @@ RULES: List[Rule] = [
     Rule("A11Y-7", "web", "should", "auto", "Help for users reads at grade 11 or lower", a11y_7),
     Rule("I18N-1", "web", "must", "auto", "The page declares its language", i18n_1),
     Rule("VER-1", "app", "must", "auto", "The version is YYYY.M.N, in one file", ver_1, older="should"),
+    Rule("VER-7", "internal", "should", "auto", "An internal web app's version is the date: the changelog and the package agree", ver_5),
+    Rule("VER-8", "internal", "should", "auto", "An internal web app releases itself once a day, early morning Eastern", ver_6),
     Rule("MOBILE-5", "web", "must", "auto", "The page fills the screen around the notch", mobile_5, older="should", blocks=False),
     Rule("MOBILE-6", "web", "must", "auto", "Text fields are 16 px on a phone", mobile_6, older="should", blocks=False),
     Rule("MOBILE-7", "web", "must", "auto", "Dialogs have a height limit and scroll inside it", mobile_7, older="should", blocks=False),
@@ -2269,6 +2350,9 @@ RULE_SINCE: Dict[str, str] = {
     ),
     "3.6": (
         "CODE-1"
+    ),
+    "3.8": (
+        "VER-7 VER-8 REPO-12"
     ),
 }
 

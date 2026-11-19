@@ -76,3 +76,7 @@ An MCP server for SD.Next (public repository).
 
 - Put scratch and worktrees under the system temporary directory, one folder per session, and nowhere else; remove the folder when the run ends (TMP-7).
 - Clean up in the same run (WORK-9): remove your worktrees, run `python3 scripts/tidy.py --issues`, close the issue your merged pull request finished with a comment naming it (`Closes #N` finishes, `Refs #N` does part), and turn unpushed work into a draft pull request. Report what cleaning could not settle once, in your end-of-run report; never append leftovers to an answer about something else.
+
+## Issues kept true
+
+- Keep the open issues true (WORK-10): each is real work still to do, has at least one label, and its labels say how things stand now. A label the queue reads to skip an issue (`in-progress`, `parked`, `owner-decision`, `question`, `blocked-external`, `needs-migration`, `deferred`) comes off the moment its reason is gone. No two open issues are the same work. End a run with `python3 scripts/issue_hygiene.py` and settle what it lists for the issues you touched; the `repo-cleanup` skill does the whole repository. Never close or relabel without a comment giving the evidence. Why: the queue picks its work by these labels, so a wrong one hides an issue or sends a run at work that cannot be done.

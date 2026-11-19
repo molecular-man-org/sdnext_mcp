@@ -7,7 +7,10 @@
 # (an update must never touch the project's files), runs the project's check
 # command, and prints the standard's score before and after.
 #
-# Run it on a clean branch. It commits nothing.
+# Run it on a clean branch. It commits nothing. It fails when the update left Copier's conflict markers
+# (`<<<<<<< before updating` ... `>>>>>>> after updating`) in any changed file: a project's edit to a kit file that
+# the new version also changed is merged that way, and a committed marker is read by whoever opens the file
+# (a queue run reads `.claude/queue.md` every time; realm-weaver, Issue #170).
 #
 # Owned by the template: change it there, not in a project.
 set -uo pipefail
@@ -49,7 +52,7 @@ if [ "$after_update" = 0 ]; then
 fi
 
 # The kit's own files: everything an update is allowed to rewrite.
-kit='^(\.copier-answers\.yml|standard-baseline\.json|scripts/(standard_check\.py|standard-checks\.sh|ci-tools\.sh|ci-verdict\.py|pr_flow\.py|fix_workflows\.py|fix_standard\.py|format-check\.sh|lint-check\.sh|lane-fix\.sh|kit-update\.sh|vuln-scan\.py|dep_merge\.py|work\.py|automerge\.py|branch_cleanup\.py|tidy\.py|migration-new\.py|ipad-smoke\.py|failure_issue\.py|builder_refresh\.py)|docs/phone-app-decisions\.md|e2e/kit/|\.claude/(hooks|agents|skills)/|\.claude/queue\.md|\.github/workflows/(builder-(sync|cleanup)[^/]*|vuln-scan|dependency-merge|automerge|branch-cleanup|failure-issue|agent-issue|e2e-full)\.yml)'
+kit='^(\.copier-answers\.yml|standard-baseline\.json|scripts/(standard_check\.py|standard-checks\.sh|ci-tools\.sh|ci-verdict\.py|pr_flow\.py|fix_workflows\.py|fix_standard\.py|format-check\.sh|lint-check\.sh|lane-fix\.sh|kit-update\.sh|vuln-scan\.py|dep_merge\.py|work\.py|automerge\.py|branch_cleanup\.py|tidy\.py|issue_count\.py|issue_hygiene\.py|copy_sync\.py|stale_checks\.py|daily_release\.py|migration-new\.py|ipad-smoke\.py|failure_issue\.py|builder_refresh\.py)|docs/phone-app-decisions\.md|e2e/kit/|\.claude/(hooks|agents|skills)/|\.claude/queue\.md|\.github/workflows/(builder-(sync|cleanup)[^/]*|daily-release|stale-checks|vuln-scan|dependency-merge|automerge|branch-cleanup|failure-issue|agent-issue|e2e-full)\.yml)'
 changed=$(git status --porcelain | cut -c4-)
 others=$(printf '%s\n' "$changed" | grep -v -E "$kit" | grep -v '^$' || true)
 
@@ -66,6 +69,19 @@ if [ -n "$others" ]; then
   echo "FAILED: the update changed files that are the project's own, or left a conflict:" >&2
   printf '%s\n' "$others" | sed 's/^/  /' >&2
   echo "Read each one before going on. A file ending in .rej is a change that did not apply." >&2
+  failed=1
+fi
+
+# Copier merges a project's edit to a kit file with the new version by writing both into the file between markers.
+# The marker lines are exact, so a Markdown rule (`=======` under a heading) or a diff in a document is not taken for one.
+conflicted=()
+while IFS= read -r name; do
+  [ -f "$name" ] && grep -q -E '^(<<<<<<< before updating|>>>>>>> after updating)$' "$name" && conflicted+=("$name")
+done < <(git status --porcelain --untracked-files=all | cut -c4- | grep -v '^$' || true)
+if [ "${#conflicted[@]}" -gt 0 ]; then
+  echo "FAILED: the update left conflict markers (<<<<<<< before updating) in:" >&2
+  printf '  %s\n' "${conflicted[@]}" >&2
+  echo "Keep the right half of each, delete the markers, and run the update's checks again. Never commit them." >&2
   failed=1
 fi
 
