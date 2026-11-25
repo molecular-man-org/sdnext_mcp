@@ -52,7 +52,10 @@ TRAILER = re.compile(r"^[A-Za-z][A-Za-z0-9-]*: ")
 
 def sh(args: List[str], check: bool = True) -> str:
     """Run a command and return what it printed. Replaced in the tests."""
-    done = subprocess.run(args, capture_output=True, text=True)
+    try:
+        done = subprocess.run(args, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{' '.join(args[:3])} did not finish in 300 seconds") from None
     if check and done.returncode != 0:
         raise RuntimeError(f"{' '.join(args[:3])} failed: {done.stderr.strip() or done.stdout.strip()}")
     return done.stdout

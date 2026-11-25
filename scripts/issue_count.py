@@ -82,7 +82,11 @@ def main() -> int:
     command = ["gh", "issue", "list", "--state", "all", "--limit", "1000", "--json", "number,title,body,labels,author,createdAt,closedAt"]
     if args.repo:
         command += ["-R", args.repo]
-    done = subprocess.run(command, capture_output=True, text=True)
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        print("gh did not list the issues in 300 seconds", file=sys.stderr)
+        return 1
     if done.returncode != 0:
         print(f"gh could not list the issues: {done.stderr.strip() or done.stdout.strip()}", file=sys.stderr)
         return 1

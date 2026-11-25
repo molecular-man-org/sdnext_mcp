@@ -12,7 +12,8 @@ open issues are the same work, and nothing finished is left lying about. This li
 - UNLABELLED          an open issue with no label;
 - BLOCKER-GONE        an issue that says it is blocked by issues that are all closed, or by one that does not exist;
 - BLOCKER-CIRCLE      open issues that block each other;
-- DEFERRED-DUE        a `deferred` issue whose "Deferred until" date has passed, or that names no date;
+- DEFERRED-DUE        a `deferred` issue whose date ("Deferred until", "review on", "revisit on", "until") has passed, or that
+                      names neither a date nor a condition ("Remove the label when ...", "leave this until ...");
 - IN-PROGRESS-STALE   `in-progress` with no open pull request and nothing new for a day;
 - FINISHED            an open issue a merged pull request closes by name (`Closes #N`, `Fixes #N`, `Resolves #N`);
 - DUPLICATE           two open issues whose titles are nearly the same;
@@ -56,7 +57,11 @@ KIT_LABELS: Dict[str, Tuple[str, str]] = {
 KEEP_BRANCHES = {"main", "master", "lovable-sync", "builder-cleanup/autofix"}
 BLOCKED_BY = re.compile(r"(?i)\b(?:blocked (?:by|on)|depends on|waiting (?:on|for)|waits (?:on|for)|needs)\s+((?:#\d+(?:\s*(?:,|and|&)\s*)?)+)")
 CLOSES = re.compile(r"(?i)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+#(\d+)")
-DEFERRED_UNTIL = re.compile(r"(?i)deferred until (\d{4}-\d{2}-\d{2})")
+# The owner's dated deferrals come worded several ways ("Deferred until 2026-12-01", "review on 2026-12-01", "revisit on",
+# "until"): all name a date. A deferral that names a condition instead has no date to pass (Issue #201).
+DEFERRED_UNTIL = re.compile(r"(?i)\b(?:deferred until|defer until|until|review(?:ed)? (?:on|by)|revisit(?:ed)? (?:on|by))\s+(\d{4}-\d{2}-\d{2})")
+DEFERRED_CONDITION = re.compile(r"(?i)\b(?:remove the label when|leave (?:this|it) until|deferred until (?!\d{4}-\d{2}-\d{2}))")
+DEFERRED_WORDING = "'Deferred until YYYY-MM-DD (owner, date): reason' or 'Remove the label when <the condition>'"
 DUPLICATE_RATIO = 0.9
 
 Finding = Dict[str, Any]
@@ -67,7 +72,11 @@ class GitHubError(Exception):
 
 
 def gh(args: List[str], repo: Optional[str]) -> str:
-    done = subprocess.run(["gh", *args, *(["-R", repo] if repo and args[0] != "api" else [])], capture_output=True, text=True)
+    try:
+        done = subprocess.run(["gh", *args, *(["-R", repo] if repo and args[0] != "api" else [])], capture_output=True, text=True,
+                              timeout=300)
+    except subprocess.TimeoutExpired:
+        raise GitHubError(f"gh {' '.join(args[:3])}: no answer in 300 seconds") from None
     if done.returncode != 0:
         raise GitHubError(f"gh {' '.join(args[:3])}: {done.stderr.strip() or done.stdout.strip()}")
     return done.stdout
@@ -123,8 +132,11 @@ def check_issues(issues: List[Dict[str, Any]], prs: List[Dict[str, Any]], state_
                                  + ", which does not exist", blockers=missing))
         if "deferred" in labels:
             dates = DEFERRED_UNTIL.findall(words(issue))
-            if not dates:
-                found.append(finding("DEFERRED-DUE", issue, "labelled deferred but no comment says 'Deferred until YYYY-MM-DD'"))
+            if not dates and DEFERRED_CONDITION.search(words(issue)):
+                pass  # deferred until something happens, not until a day: nothing passes
+            elif not dates:
+                found.append(finding("DEFERRED-DUE", issue, "labelled deferred but no comment names a date or a condition; if "
+                                     f"the owner's decision is already in the thread, add one comment: {DEFERRED_WORDING}"))
             elif dates[-1] <= now.date().isoformat():
                 found.append(finding("DEFERRED-DUE", issue, f"deferred until {dates[-1]}, which has passed", until=dates[-1]))
         if "in-progress" in labels and now - parse(issue["updatedAt"]) > datetime.timedelta(days=1):
@@ -270,7 +282,11 @@ def survey(repo: Optional[str], now: datetime.datetime, stale_days: int, create_
 
     def state_of(number: int) -> str:
         if number not in states:
-            done = subprocess.run(["gh", "api", f"repos/{repo}/issues/{number}", "-q", ".state"], capture_output=True, text=True)
+            try:
+                done = subprocess.run(["gh", "api", f"repos/{repo}/issues/{number}", "-q", ".state"], capture_output=True, text=True,
+                                      timeout=120)
+            except subprocess.TimeoutExpired:
+                raise GitHubError(f"gh api issues/{number}: no answer in 120 seconds") from None
             if done.returncode == 0:
                 states[number] = done.stdout.strip() or "missing"
             elif "404" in done.stderr or "Not Found" in done.stderr:

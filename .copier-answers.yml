@@ -1,7 +1,7 @@
 ---
 # Written by Copier. Records which version of the template this project has.
 # Do not edit by hand; run `copier update` instead.
-_commit: v3.8.0
+_commit: v3.8.1
 _src_path: https://github.com/molecular-man-org/claude-repo-template.git
 accounts: false
 category: tools
@@ -9,6 +9,7 @@ ci_runner: ubuntu-latest
 code_owner: THE-MOLECULAR-MAN
 deployed: false
 exposure: none
+failure_issue_workflows: ""
 github_owner: molecular-man-org
 has_front_end: false
 project_description: An MCP server for SD.Next (public repository).
