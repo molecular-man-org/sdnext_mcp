@@ -53,6 +53,12 @@ fi
 
 # The kit's own files: everything an update is allowed to rewrite.
 kit='^(\.copier-answers\.yml|standard-baseline\.json|scripts/(standard_check\.py|standard-checks\.sh|ci-tools\.sh|ci-verdict\.py|pr_flow\.py|fix_workflows\.py|fix_standard\.py|format-check\.sh|lint-check\.sh|lane-fix\.sh|kit-update\.sh|vuln-scan\.py|dep_merge\.py|work\.py|automerge\.py|branch_cleanup\.py|tidy\.py|issue_count\.py|issue_hygiene\.py|copy_sync\.py|stale_checks\.py|daily_release\.py|migration-new\.py|ipad-smoke\.py|failure_issue\.py|builder_refresh\.py)|docs/phone-app-decisions\.md|e2e/kit/|\.claude/(hooks|agents|skills)/|\.claude/queue\.md|\.github/workflows/(builder-(sync|cleanup)[^/]*|daily-release|stale-checks|vuln-scan|dependency-merge|automerge|branch-cleanup|failure-issue|agent-issue|e2e-full)\.yml)'
+# A project with its own `.yamllint.yaml` is read by yamllint before the kit's `.yamllint.yml`, which would do nothing
+# there; copier puts it back after the project deleted it (Issue #206). Drop the one the update just added.
+if [ -f .yamllint.yaml ] && [ "$(git status --porcelain -- .yamllint.yml)" = "?? .yamllint.yml" ]; then
+  rm -f .yamllint.yml
+  echo "==> removed the kit's .yamllint.yml: this project has its own .yamllint.yaml, which yamllint reads first"
+fi
 changed=$(git status --porcelain | cut -c4-)
 others=$(printf '%s\n' "$changed" | grep -v -E "$kit" | grep -v '^$' || true)
 
@@ -85,18 +91,20 @@ if [ "${#conflicted[@]}" -gt 0 ]; then
   failed=1
 fi
 
-# Where the project formats with Prettier, the kit's new and changed files get the project's format, so the update
-# itself does not fail the project's format check (realm-weaver, v1.3.9: the two new workflows). rollout.py does the
-# same.
+# Where the project formats with Prettier, every file the update wrote gets the project's format (dot-folders and
+# workflows included), so the update itself does not fail the project's format check (realm-weaver, v1.3.9: the two new
+# workflows; bmodbridge-mobile-dev, v3.8.0: queue.md, .copier-answers.yml and a workflow, Issue #199). rollout.py does
+# the same.
 prettier=$(python3 -c 'import json; d=json.load(open("package.json")); print({**d.get("dependencies",{}),**d.get("devDependencies",{})}.get("prettier","").lstrip("^~"))' 2>/dev/null || true)
 if [ -n "$prettier" ]; then
   pretty=()
   while IFS= read -r name; do
     [ -f "$name" ] && pretty+=("$name")
-  done < <(git status --porcelain --untracked-files=all | cut -c4- | grep -E "$kit" | grep -E '\.(md|json|ya?ml)$' || true)
+  done < <(git status --porcelain --untracked-files=all | cut -c4- | grep -v '^$' || true)
   if [ "${#pretty[@]}" -gt 0 ]; then
-    echo "==> formatting ${#pretty[@]} of the kit's files with the project's Prettier $prettier"
-    npx --yes "prettier@$prettier" --write "${pretty[@]}" >/dev/null || echo "Prettier did not finish; the format check says what is left." >&2
+    echo "==> formatting ${#pretty[@]} of the update's files with the project's Prettier $prettier"
+    npx --yes "prettier@$prettier" --write --ignore-unknown "${pretty[@]}" >/dev/null || echo "Prettier did not finish; the format check says what is left." >&2
+    npx --yes "prettier@$prettier" --check --ignore-unknown "${pretty[@]}" >/dev/null 2>&1 || echo "Some files are still not in the project's format; the format check names them." >&2
   fi
 fi
 

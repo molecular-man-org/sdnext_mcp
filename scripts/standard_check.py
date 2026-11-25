@@ -197,8 +197,9 @@ def git(root: Path, *args: str) -> Optional[str]:
             encoding="utf-8",
             errors="replace",
             check=False,
+            timeout=120,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if done.returncode != 0:
         return None
